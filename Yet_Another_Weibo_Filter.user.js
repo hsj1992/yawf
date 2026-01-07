@@ -10386,34 +10386,36 @@ article[class*="Feed"].yawf-feed-filter-running::before { content: " "; display:
     cn: '这些微博一般出现在您的首页，带有“推荐”“好友赞过”等标记，但大多来自您并未关注的人。',
   };
 
-  commercial.ad = rule.Rule({
-    v7Support: true,
-    id: 'filter_ad_feed',
-    version: 109,
-    parent: commercial.commercial,
-    template: () => i18n.adFeedFilter,
-    ref: {
-      i: { type: 'bubble', icon: 'ask', template: () => i18n.adFeedFilterDetail },
-    },
-    init() {
-      const rule = this;
-      observer.feed.filter(function adFeedFilter(feed) {
-        if (!rule.isEnabled()) return null;
-        // TODO 我也不确定这个属性是做什么的
-        // if (feed.promotion) console.log('FILTERTEST promotion: %o (%o)', feed.promotion, feed);
-        // if (feed.attitude_dynamic_adid) console.log('FILTERTEST attitude_dynamic_adid: %o (%o)', feed.attitude_dynamic_adid, feed);
-        // 未关注的人的微博
-        if (['home', 'group'].includes(init.page.type()) && !feed.user.following) return 'hide';
-        // 某某赞过的微博
-        if (feed.title?.type === 'likerecommend') return 'hide';
-        // 热推 / 广告之类
-        if (feed.content_auth === 5) return 'hide';
-        if (feed.retweeted_status?.content_auth === 5) return 'hide';
-        return null;
-      }, { priority: 1e6 });
-      this.addConfigListener(() => { observer.feed.rerun(); });
-    },
-  });
+	  commercial.ad = rule.Rule({
+	    v7Support: true,
+	    id: 'filter_ad_feed',
+	    version: 110,
+	    parent: commercial.commercial,
+	    template: () => i18n.adFeedFilter,
+	    ref: {
+	      i: { type: 'bubble', icon: 'ask', template: () => i18n.adFeedFilterDetail },
+	    },
+	    init() {
+	      const rule = this;
+	      observer.feed.filter(function adFeedFilter(feed) {
+	        if (!rule.isEnabled()) return null;
+	        const isNotFollowing = v => v === false || v === 0 || v === '0';
+	        const isContentAuthAd = v => Number(v) === 5;
+	        // TODO 我也不确定这个属性是做什么的
+	        // if (feed.promotion) console.log('FILTERTEST promotion: %o (%o)', feed.promotion, feed);
+	        // if (feed.attitude_dynamic_adid) console.log('FILTERTEST attitude_dynamic_adid: %o (%o)', feed.attitude_dynamic_adid, feed);
+	        // 未关注的人的微博
+	        if (['home', 'group'].includes(init.page.type()) && isNotFollowing(feed.user?.following)) return 'hide';
+	        // 某某赞过的微博
+	        if (feed.title?.type === 'likerecommend') return 'hide';
+	        // 热推 / 广告之类
+	        if (isContentAuthAd(feed.content_auth)) return 'hide';
+	        if (isContentAuthAd(feed.retweeted_status?.content_auth)) return 'hide';
+	        return null;
+	      }, { priority: 1e6 });
+	      this.addConfigListener(() => { observer.feed.rerun(); });
+	    },
+	  });
 
   i18n.fansTopFeedFilter = {
     cn: '粉丝头条 {{i}}',
