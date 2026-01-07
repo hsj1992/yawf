@@ -10392,6 +10392,17 @@ article[class*="Feed"].yawf-feed-filter-running::before { content: " "; display:
 	    version: 110,
 	    parent: commercial.commercial,
 	    template: () => i18n.adFeedFilter,
+	    acss: `
+/* DOM fallback for promoted/recommended feeds on newer V7 layouts */
+div[class*="_body_"]:has(> header[content_auth="5"]),
+div[class*="_body_"]:has([mark*="mark_ad:"]),
+article:has(header[content_auth="5"]),
+article:has([mark*="mark_ad:"]) { display: none !important; }
+
+/* If parent selector is not available for some reason, hide the whole block by collapsing siblings */
+header[content_auth="5"],
+header[content_auth="5"] ~ * { display: none !important; }
+`,
 	    ref: {
 	      i: { type: 'bubble', icon: 'ask', template: () => i18n.adFeedFilterDetail },
 	    },
@@ -11907,7 +11918,16 @@ article[class*="Feed"].yawf-feed-filter-running::before { content: " "; display:
 
   clean.CleanGroup('icons', () => i18n.cleanIconsGroupTitle);
   clean.CleanRule('level', () => i18n.cleanIconsLevel, 1, '.icon_bed[node-type="level"], .W_level_ico, .W_icon_level { display: none !important; }');
-  const member = clean.CleanRule('member', () => i18n.cleanIconsMember, 1, '', { v7Support: true });
+  const member = clean.CleanRule('member', () => i18n.cleanIconsMember, 1, '', {
+    v7Support: true,
+    acss: `
+.woo-icon-wrap[aria-label^="vip"],
+.woo-icon-wrap[aria-label^="vipex"],
+img.woo-icon-vipimg,
+img[src*="/vvip_"],
+img[src*="vvip_"] { display: none !important; }
+`,
+  });
   const approve = clean.CleanRule('approve', () => i18n.cleanIconsApprove, 1, '', { v7Support: true });
   const approveCo = clean.CleanRule('approve_co', () => i18n.cleanIconsApproveCo, 1, '', { v7Support: true });
   clean.CleanRule('approve_dead', () => i18n.cleanIconsApproveDead, 1, '.icon_approve_dead, .icon_pf_approve_dead { display: none !important; }');
