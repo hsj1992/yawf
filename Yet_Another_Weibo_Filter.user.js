@@ -12,7 +12,7 @@
 // @description:zh-TW Yet Another Weibo Filter (YAWF) 新浪微博根據關鍵詞、作者、話題、來源等篩選微博；修改版面
 // @description:en    Sina Weibo feed filter by keywords, authors, topics, source, etc.; Modifying webpage layout
 // @namespace         https://github.com/tiansh
-// @version           5.0.110-dev.20260107
+// @version           5.0.110-dev.20260107a13.debug
 // @match             *://*.weibo.com/*
 // @match             *://t.cn/*
 // @include           *://weibo.com/*
@@ -58,7 +58,7 @@
 // @icon              data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEgAAABICAMAAABiM0N1AAAABGdBTUEAALGPC/xhBQAAAAFzUkdCAK7OHOkAAABdUExURUxpcemNSemNSemNSemNSemNSemNSemNSemNSemNSdktOumNSemNSemNSemNSemNSemNSdktOtktOtktOtktOtktOtktOtktOtktOtktOtktOtktOtktOumNSdktOsZoAhUAAAAddFJOUwAgkIAQ4MBAYPBA0KAwcLBQ0BBgIHDggDCw8JDAT2c6pQAAAiFJREFUWMPNl9lywyAMRcMOMQa7SdMV//9nNk4nqRcJhOvOVI9+OJbE5UocDn8VrBNRp3so7YWRGzBWJSAa3lZyfMLCVbF4ykVjye1JhVB2j4S+UR0FpBMhNCuDEilcKIIcjZSi3KO0W6cKUghUUHL5nktHJqW8EGz6fyTmr7dW82DGK8+MEb7ZSALYNiIkU20uMoDu4tq9jKrZYnlSACS/zYSBvnfb/HztM05uI611FjfOmNb9XgMIqSk01phgDTTR2gqBm/j4rfJdqU+K2lHHWf7ssJTM+ozFvMSG1iVV9FbmKAfXEjxDUC6KQTyDZ7KWNaAZyRLabUiOqAj3BB8lLZoSWJvA56LEUuoqty2BqZLDShJodQzZpdCba8ytH53HrXUu77K9RqyrvNaV5ptFQGRy/X78CQKpQday6zEM0+jfXl5XpAjXNmuSXoDGuHycM9tOB/Mh0DVecCcTiHBh0NA/Yfu3Rk4BAS1ICgIZEmjokS3V1YKGZ+QeV4MuTzuBpin5X4F6sEdNPWh41CbB4+/IoCP0b14nSBwUYB9R1aAWfgJpEoiBq4dbWCcBNPm5QEa7IJ3az9YwWazD0mpRzvt64Zsu6HE5XlDQ2/wREbW36EAeW0e5IsWXdMyBzhWgkAH1NU9ydqD5UWlDuKlrY2UzudsMqC+OYL5wBAT0eSql9ChOyxxoTOpUqm4Upb6ra8jE5bXiuTNk47QXiE76AnacIlJf1W5ZAAAAAElFTkSuQmCC
 // @author            田生 http://weibo.com/tsh90
 // @license           MPL-2.0
-// @updateURL         disabled
+// @updateURL         http://localhost:8080/Yet_Another_Weibo_Filter.user.js
 // @downloadURL       http://localhost:8080/Yet_Another_Weibo_Filter.user.js
 // @homepageURL       https://tiansh.github.io/yawf/
 // @supportURL        https://github.com/tiansh/yawf/issues
@@ -183,6 +183,13 @@
     }
   }
 
+}());
+//#endregion
+//#region YAWF Debug Logger
+; (function () {
+  console.log('[YAWF DEBUG] Script started at', new Date().toISOString());
+  console.log('[YAWF DEBUG] Location:', location.href);
+  console.log('[YAWF DEBUG] Top frame:', top === self);
 }());
 //#endregion
 //#region custom implementation interests
@@ -698,6 +705,7 @@
   };
 
   util.inject = function (func, ...params) {
+    console.log('[YAWF DEBUG] util.inject called with function:', func.name || 'anonymous');
     if (typeof func !== 'function') return Promise.reject();
     const setupScript = firstCall ? `(${init}(${JSON.stringify([baseKey, replyKey])}));` : ''; firstCall = false;
     const executeScript = setupScript + `window[${JSON.stringify(baseKey)}](${func},${serialize(params)});`;
@@ -1427,7 +1435,7 @@
           },
         });
         const reject = function () {
-          const event = new CustomEvent(key, { detail: { } });
+          const event = new CustomEvent(key, { detail: {} });
           window.dispatchEvent(event);
         };
         const script = document.createElement('script');
@@ -1507,7 +1515,7 @@
   const baseUrl = new URL({
     userCard: '//weibo.com/aj/v6/user/newcard',
     userCard_abroad: '//www.weibo.com/aj/v6/user/newcard',
-  // document.domain 基于 STK.lib.card.usercard.basecard 并非笔误
+    // document.domain 基于 STK.lib.card.usercard.basecard 并非笔误
   }[document.domain === 'www.weibo.com' ? 'userCard_abroad' : 'userCard'], location.href);
 
   let lastRequest = Promise.resolve();
@@ -3054,6 +3062,7 @@ html { background: #f9f9fa; }
   }, true);
 
   util.inject(function (rootKey, key) {
+    console.log('[YAWF DEBUG] Injected vueSetup script started, rootKey:', rootKey);
     let rootVm = null;
 
     const kebabCase = function (word) {
@@ -3077,6 +3086,7 @@ html { background: #f9f9fa; }
     // 发现任何 Vue 元素的时候上报消息以方便其他模块修改该元素
     const reportNewVM = function (vm, node, replace) {
       const tag = getTag(vm);
+      console.log('[YAWF DEBUG] reportNewVM called, tag:', tag);
       if (allComponentVM.has(vm)) return;
       allComponentVM.add(vm);
 
@@ -3109,7 +3119,7 @@ html { background: #f9f9fa; }
       if (!allComponentVMByTagName.has(tag)) return [];
       return [...allComponentVMByTagName.get(tag)].flatMap(ref => {
         const vm = ref.deref();
-        if (!vm || !vm._isMounted) return [];
+        if (!vm || !isMountedVm(vm)) return [];
         return [vm];
       });
     };
@@ -3133,25 +3143,122 @@ html { background: #f9f9fa; }
       }
     };
 
+    // Vue 3 辅助函数
+    const getVue3InternalFromNode = function (node) {
+      if (node.__vueParentComponent) return node.__vueParentComponent;
+      const app = node.__vue_app__;
+      if (app && app._instance) return app._instance;
+      return null;
+    };
+    const getVue3InternalFromVm = function (vm) {
+      if (!vm) return null;
+      if (vm.type && vm.vnode) return vm;
+      if (vm.$ && vm.$.type && vm.$.vnode) return vm.$;
+      return null;
+    };
+    const getPublicVmFromNode = function (node) {
+      if (node.__vue__) return node.__vue__;
+      const vm3 = getVue3InternalFromNode(node);
+      return vm3?.proxy || vm3?.ctx || null;
+    };
+    const isVue2Vm = function (vm) {
+      if (!vm) return false;
+      if (getVue3InternalFromVm(vm)) return false;
+      return !!vm._isVue;
+    };
+    const isMountedVm = function (vm) {
+      if (isVue2Vm(vm)) return !!vm._isMounted;
+      const internal = getVue3InternalFromVm(vm);
+      return !!internal?.isMounted;
+    };
+    const getVmEl = function (vm) {
+      if (isVue2Vm(vm)) return vm.$el;
+      const internal = getVue3InternalFromVm(vm);
+      return internal?.vnode?.el || internal?.subTree?.el || null;
+    };
+    const getVmKey = function (vm) {
+      if (isVue2Vm(vm)) return vm.$vnode?.key;
+      const internal = getVue3InternalFromVm(vm);
+      return internal?.vnode?.key;
+    };
+    const getVmParent = function (vm) {
+      if (isVue2Vm(vm)) return vm.$parent;
+      const internal = getVue3InternalFromVm(vm);
+      return internal?.parent?.proxy || internal?.parent;
+    };
+
+    const safeStringify = function (value) {
+      const seen = new WeakSet();
+      return JSON.stringify(value, (key, val) => {
+        try {
+          if (val && typeof val === 'object') {
+            if (seen.has(val)) return undefined;
+            seen.add(val);
+          }
+          if (typeof val === 'function') return undefined;
+          return val;
+        } catch (e) {
+          // 捕获getter可能抛出的错误
+          console.warn('[YAWF] safeStringify error for key:', key, e);
+          return undefined;
+        }
+      });
+    };
+
     const routeReportObject = function (vm) {
-      return vm.$route ? JSON.parse(JSON.stringify({
-        name: vm.$route.name,
-        fullPath: vm.$route.fullPath,
-        path: vm.$route.path,
-        params: vm.$route.params,
-        query: vm.$route.query,
-        meta: vm.$route.meta,
+      const proxy = isVue2Vm(vm) ? vm : (vm?.proxy || vm);
+      const route = proxy?.$route;
+      return route ? JSON.parse(safeStringify({
+        name: route.name,
+        fullPath: route.fullPath,
+        path: route.path,
+        params: route.params,
+        query: route.query,
+        meta: route.meta,
       })) : null;
     };
     // 发现 Vue 根元素的时候启动脚本的初始化
-    const reportRootNode = function (node) {
-      const vm = node.__vue__;
-      rootVm = vm;
-      const config = vm.config;
-      const route = routeReportObject(vm);
+    const reportRootNode = function (node, vm) {
+      const publicVm = vm || getPublicVmFromNode(node);
+      const internal = getVue3InternalFromVm(publicVm);
+      rootVm = publicVm;
+      const route = routeReportObject(publicVm);
+      // 只序列化config中必需的字段,避免触发problematic的computed属性
+      let configJson = '{}';
+      try {
+        // 尝试从多个可能的位置获取用户信息
+        let user = null;
+        const fullConfig = isVue2Vm(publicVm) ? publicVm.config : internal?.appContext?.config;
+
+        // 尝试从globalProperties.$CONFIG获取
+        if (fullConfig?.globalProperties?.$CONFIG?.user) {
+          user = fullConfig.globalProperties.$CONFIG.user;
+        }
+        // 尝试从$store获取
+        else if (publicVm?.$store?.state?.user) {
+          user = publicVm.$store.state.user;
+        }
+
+        console.log('[YAWF DEBUG] found user:', user);
+        console.log('[YAWF DEBUG] globalProperties:', fullConfig?.globalProperties);
+
+        if (user) {
+          const minimalConfig = {
+            user: {
+              idstr: user.idstr || user.id?.toString(),
+              screen_name: user.screen_name || user.name,
+              id: user.id,
+            }
+          };
+          configJson = JSON.stringify(minimalConfig);
+        }
+      } catch (e) {
+        console.warn('[YAWF] Error extracting config:', e);
+      }
+      console.log('[YAWF DEBUG] dispatching event, configJson:', configJson);
       const event = new CustomEvent(key, {
         detail: {
-          config: JSON.stringify(config),
+          config: configJson,
           route: JSON.stringify(route),
         },
       });
@@ -3164,24 +3271,35 @@ html { background: #f9f9fa; }
       document.documentElement.dispatchEvent(event);
     };
     let unwatchRouteChange = null;
-    const listenRouteChange = function (node) {
+    const listenRouteChange = function (node, vm) {
       if (unwatchRouteChange) unwatchRouteChange();
-      const vm = node.__vue__;
-      unwatchRouteChange = vm.$watch(function () {
-        return JSON.stringify(routeReportObject(vm));
+      const publicVm = vm || getPublicVmFromNode(node);
+      if (!publicVm || typeof publicVm.$watch !== 'function') return;
+      unwatchRouteChange = publicVm.$watch(function () {
+        return JSON.stringify(routeReportObject(publicVm));
       }, function (route) {
         reportRouteChange(JSON.parse(route));
       });
     };
 
     const getTag = function (vm) {
-      const name = kebabCase(vm.$options.name || vm.$options._componentTag);
-      return name;
+      if (isVue2Vm(vm)) {
+        return kebabCase(vm.$options.name || vm.$options._componentTag);
+      }
+      const internal = getVue3InternalFromVm(vm) || vm;
+      const type = internal?.type || internal?.vnode?.type;
+      const name = type?.name || type?.__name || type?.displayName;
+      return name ? kebabCase(name) : '';
     };
     /** @type {WeakMap<Object, Node>} */
     const markElement = function (node, vm) {
-      if (!vm || vm.$el !== node || !vm._isMounted) return;
+      console.log('[YAWF DEBUG] markElement called, node:', node?.tagName, 'vm:', !!vm);
+      if (!vm || getVmEl(vm) !== node || !isMountedVm(vm)) {
+        console.log('[YAWF DEBUG] markElement early return - vm:', !!vm, 'elMatch:', getVmEl(vm) === node, 'mounted:', isMountedVm(vm));
+        return;
+      }
       const tag = getTag(vm);
+      console.log('[YAWF DEBUG] markElement tag:', tag);
       if (tag && node instanceof Element) {
         if (node.hasAttribute('yawf-component-tag')) {
           const tags = [...new Set([...node.getAttribute('yawf-component-tag').split(' '), tag]).values()].join(' ');
@@ -3190,7 +3308,7 @@ html { background: #f9f9fa; }
           node.setAttribute('yawf-component-tag', tag);
         }
       }
-      const key = vm.$vnode?.key;
+      const key = getVmKey(vm);
       if (key != null && node instanceof Element) {
         node.setAttribute('yawf-component-key', key);
       }
@@ -3198,56 +3316,213 @@ html { background: #f9f9fa; }
         reportNewVM(vm, node);
       }
     };
+    const collectVue3ChildComponents = function (vnode, list) {
+      if (!vnode) return;
+      if (vnode.component) list.push(vnode.component);
+      const children = vnode.children;
+      if (Array.isArray(children)) {
+        children.forEach(child => collectVue3ChildComponents(child, list));
+      } else if (children && typeof children === 'object') {
+        Object.values(children).forEach(child => {
+          if (Array.isArray(child)) {
+            child.forEach(v => collectVue3ChildComponents(v, list));
+          } else if (child && typeof child === 'object') {
+            collectVue3ChildComponents(child, list);
+          }
+        });
+      }
+    };
     const eachVmForNode = function* (node) {
       const visited = new Set();
-      const queue = [node.__vue__];
+      const queue = [];
+      if (node.__vue__) queue.push(node.__vue__);
+      const vue3Internal = getVue3InternalFromNode(node);
+      if (vue3Internal) queue.push(vue3Internal);
       while (queue.length) {
         const vm = queue.shift();
-        if (vm == null || !vm._isVue) continue;
-        if (vm.$el !== node || visited.has(vm)) continue;
+        if (vm == null) continue;
+        // Vue 2
+        if (isVue2Vm(vm)) {
+          if (vm.$el !== node || visited.has(vm)) continue;
+          visited.add(vm);
+          yield vm;
+          if (vm.$parent) queue.unshift(vm.$parent);
+          if (Array.isArray(vm.$children)) {
+            queue.push(...vm.$children);
+          }
+          if (vm.$slots) {
+            const slots = Object.keys(vm.$slots).flatMap(key => vm.$slots[key]);
+            queue.push(...slots.map(slot => slot?.componentInstance));
+          }
+          continue;
+        }
+        // Vue 3
+        if (!vm.type || !vm.vnode) continue;
+        const el = vm.vnode?.el || vm.subTree?.el;
+        if (el !== node || visited.has(vm)) continue;
         visited.add(vm);
-        yield vm;
-        if (vm.$parent) queue.unshift(vm.$parent);
-        if (Array.isArray(vm.$children)) {
-          queue.push(...vm.$children);
-        }
-        if (vm.$slots) {
-          const slots = Object.keys(vm.$slots).flatMap(key => vm.$slots[key]);
-          queue.push(...slots.map(slot => slot?.componentInstance));
-        }
+        yield vm.proxy || vm;
+        if (vm.parent) queue.unshift(vm.parent);
+        const children = [];
+        collectVue3ChildComponents(vm.subTree, children);
+        if (children.length) queue.push(...children);
       }
     };
     const watchVueAttr = function (node) {
-      let __vue__ = node.__vue__;
-      delete node.__vue__;
-      Object.defineProperty(node, '__vue__', {
-        configurable: true,
-        set(n) {
-          __vue__ = n;
-          markElement(node, n);
-        },
-        get() {
-          return __vue__;
-        },
-      });
+      try {
+        const desc = Object.getOwnPropertyDescriptor(node, '__vue__');
+        if (desc && !desc.configurable) return;
+        let __vue__ = node.__vue__;
+        delete node.__vue__;
+        Object.defineProperty(node, '__vue__', {
+          configurable: true,
+          set(n) {
+            __vue__ = n;
+            markElement(node, n);
+          },
+          get() {
+            return __vue__;
+          },
+        });
+      } catch (e) { /* ignore */ }
+    };
+    const watchVue3Attr = function (node) {
+      // Vue 3 使用 Object.defineProperty 设置 __vue_app__，会覆盖我们的 setter
+      // 所以我们使用 MutationObserver 监听 data-v-app 属性
+      if (node.nodeType !== Node.ELEMENT_NODE) return;
+
+      // 检查是否已经有 Vue 3 app
+      if (node.__vue_app__) {
+        console.log('[YAWF DEBUG] Found existing __vue_app__ on node:', node.tagName);
+        setTimeout(() => traverseVue3App(node.__vue_app__), 0);
+      }
+
+      // 监听 data-v-app 属性的添加（Vue 3 挂载标志）
+      if (node.id === 'app' || node.hasAttribute('data-v-app')) {
+        const attrObserver = new MutationObserver((mutations) => {
+          for (const mutation of mutations) {
+            if (mutation.type === 'attributes' && mutation.attributeName === 'data-v-app') {
+              console.log('[YAWF DEBUG] data-v-app attribute added to:', node.tagName);
+              if (node.__vue_app__) {
+                setTimeout(() => traverseVue3App(node.__vue_app__), 0);
+              }
+              attrObserver.disconnect();
+            }
+          }
+        });
+        attrObserver.observe(node, { attributes: true, attributeFilter: ['data-v-app'] });
+
+        // 如果已经有 data-v-app 属性，立即处理
+        if (node.hasAttribute('data-v-app') && node.__vue_app__) {
+          console.log('[YAWF DEBUG] Node already has data-v-app:', node.tagName);
+          setTimeout(() => traverseVue3App(node.__vue_app__), 0);
+          attrObserver.disconnect();
+        }
+      }
+
+      // 同时保留原来的 __vueParentComponent 监听
+      try {
+        let __vueParentComponent = node.__vueParentComponent;
+        if (__vueParentComponent) {
+          markElement(node, __vueParentComponent?.proxy || __vueParentComponent);
+        }
+        delete node.__vueParentComponent;
+        Object.defineProperty(node, '__vueParentComponent', {
+          configurable: true,
+          set(n) {
+            __vueParentComponent = n;
+            markElement(node, n?.proxy || n);
+          },
+          get() {
+            return __vueParentComponent;
+          },
+        });
+      } catch (e) { /* ignore */ }
+    };
+    // 遍历 Vue 3 应用的组件树
+    const traverseVue3App = function (app) {
+      console.log('[YAWF DEBUG] traverseVue3App called');
+      const vnode = app._container?._vnode;
+      const rootComponent = vnode?.component;
+      console.log('[YAWF DEBUG] rootComponent exists:', !!rootComponent);
+      if (!rootComponent) return;
+      // 报告根节点
+      const rootEl = rootComponent.vnode?.el || rootComponent.subTree?.el;
+      console.log('[YAWF DEBUG] rootEl:', rootEl, 'parent:', rootComponent.parent);
+      if (rootEl && rootComponent.parent == null) {
+        console.log('[YAWF DEBUG] Calling reportRootNode');
+        reportRootNode(rootEl, rootComponent.proxy || rootComponent);
+        listenRouteChange(rootEl, rootComponent.proxy || rootComponent);
+      } else {
+        console.log('[YAWF DEBUG] NOT calling reportRootNode - rootEl:', !!rootEl, 'parent==null:', rootComponent.parent == null);
+      }
+      // 遍历所有组件
+      traverseVue3Component(rootComponent);
+    };
+    const traverseVue3Component = function (comp, depth = 0) {
+      if (!comp || depth > 50) return;
+      // 处理当前组件
+      const el = comp.vnode?.el || comp.subTree?.el;
+      const type = comp.type;
+      const name = type?.name || type?.__name || type?.displayName || 'anonymous';
+      if (depth <= 15) {
+        console.log('[YAWF DEBUG] traverseVue3Component depth:', depth, 'name:', name, 'el:', el?.tagName, 'isMounted:', comp.isMounted);
+      }
+      if (el && comp.isMounted) {
+        markElement(el, comp.proxy || comp);
+      }
+      // 遍历子组件
+      const checkVNode = (vnode) => {
+        if (!vnode) return;
+        if (vnode.component) {
+          traverseVue3Component(vnode.component, depth + 1);
+        }
+        if (Array.isArray(vnode.children)) {
+          vnode.children.forEach(checkVNode);
+        }
+        if (vnode.children && typeof vnode.children === 'object' && !Array.isArray(vnode.children)) {
+          Object.values(vnode.children).forEach(child => {
+            if (Array.isArray(child)) {
+              child.forEach(checkVNode);
+            } else if (child && typeof child === 'object') {
+              checkVNode(child);
+            }
+          });
+        }
+      };
+      checkVNode(comp.subTree);
     };
     let seenElement = new WeakSet();
+    let nodeCount = 0;
     /** @param {Node} node */
     const eachMountedNode = function (node) {
       if (seenElement.has(node)) return;
       seenElement.add(node);
+      nodeCount++;
+      if (nodeCount <= 10 || nodeCount % 100 === 0) {
+        console.log('[YAWF DEBUG] eachMountedNode #' + nodeCount + ', node:', node.tagName || node.nodeName);
+      }
       if (node.nodeType === Node.ELEMENT_NODE) {
+        // Vue 2 检测
         if (node.__vue__) {
+          console.log('[YAWF DEBUG] Found Vue 2 node:', node.tagName);
           for (let vm of eachVmForNode(node)) {
-            // 如果发现根元素，那么初始化脚本
-            if (vm.$parent == null) {
-              reportRootNode(node);
-              listenRouteChange(node);
+            if (isVue2Vm(vm)) {
+              if (vm.$parent == null) {
+                reportRootNode(node, vm);
+                listenRouteChange(node, vm);
+              }
+              markElement(node, vm);
             }
-            markElement(node, vm);
           }
         }
+        // Vue 3 检测 - 通过 __vue_app__ 遍历组件树
+        if (node.__vue_app__) {
+          console.log('[YAWF DEBUG] Found Vue 3 app node:', node.tagName);
+          traverseVue3App(node.__vue_app__);
+        }
         watchVueAttr(node);
+        watchVue3Attr(node);
       }
       if (node.children) {
         [...node.children].forEach(eachMountedNode);
@@ -3263,9 +3538,22 @@ html { background: #f9f9fa; }
     observer.observe(document.documentElement, { childList: true, subtree: true });
     eachMountedNode(document.documentElement);
 
+    // 监听 Vue 3 组件实例创建
+    if (Array.isArray(window.__VUE_INSTANCE_SETTERS__)) {
+      window.__VUE_INSTANCE_SETTERS__.push(function (instance) {
+        if (instance && instance.isMounted) {
+          const el = instance.vnode?.el || instance.subTree?.el;
+          if (el) {
+            markElement(el, instance.proxy || instance);
+          }
+        }
+      });
+    }
+
     Object.defineProperty(window, rootKey, { value: {}, enumerable: false, writable: false });
     const yawf = window[rootKey];
     const vueSetup = yawf.vueSetup = yawf.vueSetup ?? {};
+    console.log('[YAWF DEBUG] vueSetup initialized, rootKey:', rootKey);
 
     vueSetup.getRootVm = () => rootVm;
 
@@ -3274,7 +3562,7 @@ html { background: #f9f9fa; }
     vueSetup.getComponentsByTagName = getComponentsByTagName;
 
     vueSetup.closest = function (vm, tag) {
-      for (let p = vm; p; p = p.$parent) {
+      for (let p = vm; p; p = getVmParent(p)) {
         if (getTag(p) === kebabCase(tag)) {
           return p;
         }
@@ -4007,122 +4295,122 @@ html { background: #f9f9fa; }
 //#endregion
 //#region implementation for chat page
 ; (function () {
-/* eslint-disable indent */
-if (!/^https:\/\/api.weibo.com\/chat/.test(location.href)) return;
-//#region @require yaofang://content/chat/init.js
-; (function () {
+  /* eslint-disable indent */
+  if (!/^https:\/\/api.weibo.com\/chat/.test(location.href)) return;
+  //#region @require yaofang://content/chat/init.js
+  ; (function () {
 
-  const yawf = window.yawf;
-  const config = yawf.config;
+    const yawf = window.yawf;
+    const config = yawf.config;
 
-  const init = yawf.init = {};
+    const init = yawf.init = {};
 
-  init.userConfig = new Promise(resolve => {
-    init.setUserData = async function (userData) {
-      const id = userData.id;
-      await config.init(id);
-      resolve(config.user);
-    };
-  });
+    init.userConfig = new Promise(resolve => {
+      init.setUserData = async function (userData) {
+        const id = userData.id;
+        await config.init(id);
+        resolve(config.user);
+      };
+    });
 
-}());
-//#endregion
-//#region replacement of yaofang://content/chat/inject.js
-; (function () {
-
-  const yawf = window.yawf;
-  const init = yawf.init;
-
-  ; (async function () {
-    const userDataUrl = '/webim/2/account/profile/basic.json?source=209678993&t=' + Date.now();
-    const userData = await fetch(userDataUrl).then(resp => resp.json());
-    init.setUserData(userData);
   }());
+  //#endregion
+  //#region replacement of yaofang://content/chat/inject.js
+  ; (function () {
 
-}());
-//#endregion
-//#region @require yaofang://content/chat/rule.js
-; (function () {
+    const yawf = window.yawf;
+    const init = yawf.init;
 
-  const yawf = window.yawf;
-  const util = yawf.util;
-  const init = yawf.init;
+    ; (async function () {
+      const userDataUrl = '/webim/2/account/profile/basic.json?source=209678993&t=' + Date.now();
+      const userData = await fetch(userDataUrl).then(resp => resp.json());
+      init.setUserData(userData);
+    }());
 
-  const css = util.css;
+  }());
+  //#endregion
+  //#region @require yaofang://content/chat/rule.js
+  ; (function () {
 
-  ; (async function avatarShape() {
-    const userConfig = await init.userConfig;
-    const isEnabled = userConfig.key('layout_avatar_shape').get();
-    if (!isEnabled) return;
-    const shape = userConfig.key('layout_avatar_shape.shape').get();
-    if (shape === 'square') {
-      // 是的，他们就是有的拼成了 avatar 有的拼成了 avator ；顺便一说，前面一个拼得对
-      css.append(`
+    const yawf = window.yawf;
+    const util = yawf.util;
+    const init = yawf.init;
+
+    const css = util.css;
+
+    ; (async function avatarShape() {
+      const userConfig = await init.userConfig;
+      const isEnabled = userConfig.key('layout_avatar_shape').get();
+      if (!isEnabled) return;
+      const shape = userConfig.key('layout_avatar_shape.shape').get();
+      if (shape === 'square') {
+        // 是的，他们就是有的拼成了 avatar 有的拼成了 avator ；顺便一说，前面一个拼得对
+        css.append(`
 #app .avatar, #app .avator { border-radius: 0; }
 `);
-    }
-  }());
-
-  const newTabDefault = function () {
-    const base = document.createElement('base');
-    base.target = '_blank';
-    document.body.appendChild(base);
-  };
-  if (self !== top) {
-    if (document.body) {
-      newTabDefault();
-    } else {
-      document.addEventListener('DOMContentLoaded', event => {
-        newTabDefault();
-      });
-    }
-  }
-
-  const disableUnloadPrompt = function () {
-    util.inject(function disableBeforeUnload() {
-      if (!window.onbeforeunload) {
-        setTimeout(disableBeforeUnload, 100);
-      } else {
-        window.onbeforeunload = null;
-        window.onunload = null;
       }
-    });
-  };
+    }());
 
-  ; (async function () {
-    const userConfig = await init.userConfig;
-
-    const rules = [{
-      key: 'clean_icons_approve',
-      ainit: () => css.append('.avator-box .m-icon img[src$="gg=="] { display: none; }'),
-    }, {
-      key: 'clean_icons_approve_co',
-      ainit: () => css.append('.avator-box .m-icon img[src$="QmCC"] { display: none; }'),
-    }, {
-      key: 'clean_icons_club',
-      ainit: () => css.append('.avator-box .m-icon img[src$="CYII"] { display: none; }'),
-    }, {
-      key: 'clean_icons_v_girl',
-      ainit: () => css.append('.avator-box .m-icon img[src$="YII="] { display: none; }'),
-    }, {
-      key: 'clean_icons_bigfun',
-      ainit: () => css.append('#app .icon-area > i.tf { display: none; }'),
-    }];
-    rules.forEach(({ key, ainit }) => {
-      const isEnabled = userConfig.key(key).get();
-      if (isEnabled) ainit();
-    });
-
-    if (self !== top || userConfig.key('chat_page_disable_unload_prompt').get()) {
-      disableUnloadPrompt();
+    const newTabDefault = function () {
+      const base = document.createElement('base');
+      base.target = '_blank';
+      document.body.appendChild(base);
+    };
+    if (self !== top) {
+      if (document.body) {
+        newTabDefault();
+      } else {
+        document.addEventListener('DOMContentLoaded', event => {
+          newTabDefault();
+        });
+      }
     }
 
-  }());
+    const disableUnloadPrompt = function () {
+      util.inject(function disableBeforeUnload() {
+        if (!window.onbeforeunload) {
+          setTimeout(disableBeforeUnload, 100);
+        } else {
+          window.onbeforeunload = null;
+          window.onunload = null;
+        }
+      });
+    };
 
-}());
-//#endregion
-throw new Error('YAWF | chat page found, skip following executions');
-/* eslint-enable indent */
+    ; (async function () {
+      const userConfig = await init.userConfig;
+
+      const rules = [{
+        key: 'clean_icons_approve',
+        ainit: () => css.append('.avator-box .m-icon img[src$="gg=="] { display: none; }'),
+      }, {
+        key: 'clean_icons_approve_co',
+        ainit: () => css.append('.avator-box .m-icon img[src$="QmCC"] { display: none; }'),
+      }, {
+        key: 'clean_icons_club',
+        ainit: () => css.append('.avator-box .m-icon img[src$="CYII"] { display: none; }'),
+      }, {
+        key: 'clean_icons_v_girl',
+        ainit: () => css.append('.avator-box .m-icon img[src$="YII="] { display: none; }'),
+      }, {
+        key: 'clean_icons_bigfun',
+        ainit: () => css.append('#app .icon-area > i.tf { display: none; }'),
+      }];
+      rules.forEach(({ key, ainit }) => {
+        const isEnabled = userConfig.key(key).get();
+        if (isEnabled) ainit();
+      });
+
+      if (self !== top || userConfig.key('chat_page_disable_unload_prompt').get()) {
+        disableUnloadPrompt();
+      }
+
+    }());
+
+  }());
+  //#endregion
+  throw new Error('YAWF | chat page found, skip following executions');
+  /* eslint-enable indent */
 }());
 //#endregion
 //#region @require yaofang://content/ruleset/rule.js
@@ -6387,14 +6675,14 @@ article[class*="Feed"].yawf-feed-filter-running::before { content: " "; display:
             matchText(comment, configs.text.show) ||
             matchRegex(comment, configs.regex.show) ||
             matchUser(comment, configs.user.show) ||
-          false);
+            false);
           if (isShow) return 'show';
           const isHide = (
             matchText(comment, configs.text.hide) ||
             matchRegex(comment, configs.regex.hide) ||
             matchUser(comment, configs.user.hide) ||
             configs.more.bot && matchBot(comment) ||
-          false);
+            false);
           if (isHide) {
             console.log('Comment %o hidden', comment.idstr);
             return 'hide';
@@ -6450,221 +6738,221 @@ article[class*="Feed"].yawf-feed-filter-running::before { content: " "; display:
     }, util.inject.rootKey, configs);
   }, { priority: priority.LAST });
 }())
-//#endregion
-//#region @require yaofang://content/ruleset/dialog.js
-/**
- * 这个文件用于显示一个显示了若干条规则的对话框
- */
-; (function () {
-
-  const yawf = window.yawf;
-  const util = yawf.util;
-
-  const ui = util.ui;
-  const i18n = util.i18n;
-  const css = util.css;
-
-  const rule = yawf.rule;
-  const tabs = rule.tabs;
-
-  Object.assign(i18n, {
-    configDialogTitle: {
-      cn: '设置 - 药方 (YAWF)',
-      tw: '設定 - 藥方 (YAWF)',
-      en: 'Settings - YAWF (Yet Another Weibo Filter)',
-    },
-    searchEmptyInput: { cn: '键入以搜索设置项', tw: '鍵入以搜尋設定項', en: 'Type to search settings' },
-    searchEmptyResult: { cn: '未找到与您输入匹配的设置项', tw: '未找到與您輸入匹配的設置項', en: 'No Matched Settings' },
-  });
-
-  /** @type {{ [e: string]: () => HTMLElement }} */
-  const configDom = {};
-  configDom.left = () => {
-    const container = document.createElement('div');
-    container.innerHTML = '<div class="yawf-config-header"><ul class="woo-box-flex woo-tab-nav"></ul></div>';
-    return container.removeChild(container.firstChild);
-  };
-  configDom.search = () => {
-    const container = document.createElement('ul');
-    container.innerHTML = '<li class="woo-tab-item-main yawf-config-tab yawf-config-tab-search"><label><input id="yawf-config-search" class="woo-input-main yawf-config-search" type="search"><i data-v-2621="" class="woo-font icon woo-font--search yawf-config-search-logo"></i></label></li>';
-    return container.removeChild(container.firstChild);
-  };
-  configDom.item = title => {
-    const container = document.createElement('ul');
-    container.innerHTML = '<li class="woo-tab-item-main yawf-config-tab"><button></button></li>';
-    const text = container.querySelector('button');
-    text.appendChild(title);
-    return container.removeChild(container.firstChild);
-  };
-  configDom.right = () => {
-    const container = document.createElement('div');
-    container.innerHTML = '<div class="yawf-config-body yawf-window-body"></div>';
-    return container.removeChild(container.firstChild);
-  };
-  configDom.layer = () => {
-    const container = document.createElement('div');
-    container.innerHTML = '<div class="yawf-config-layer"></div>';
-    return container.removeChild(container.firstChild);
-  };
-
-  const renderTip = (layer, text) => {
-    layer.innerHTML = '<div class="woo-tip-main woo-tip-vertical yawf-empty-tip"><span class="woo-tip-icon woo-tip-warnFill yawf-empty-tip-icon"></span><span class="woo-tip-text yawf-tip-text"></p></div>';
-    layer.querySelector('.woo-tip-icon').appendChild(ui.icon('warn').documentElement).setAttribute('class', 'woo-tip-icon');
-    layer.querySelector('.yawf-tip-text').textContent = text;
-  };
-
-  const renderSearch = (layer, input, filter) => {
-    const searchTexts = (input.match(/\S+/g) || []).filter(x => !x.includes(':')).map(t => t.toUpperCase());
-    const [_verMatch, verOp, verNum] = input.match(/\bver(?:sion)?:([><]?=?)(\d+)\b/) || [];
-    const versionTest = {
-      '>': v => v > verNum,
-      '<': v => v < verNum,
-      '>=': v => v >= verNum,
-      '<=': v => v <= verNum,
-      '=': v => v === +verNum,
-      '': v => v === +verNum,
-    }[verOp] ?? (() => true);
-    layer.innerHTML = '';
-    if (!searchTexts.length && verNum == null) {
-      renderTip(layer, i18n.searchEmptyInput);
-      return;
-    }
-    const items = rule.query({
-      filter: function (item) {
-        if (!item.version) return false;
-        if (!versionTest(item.version)) return false;
-        if (typeof filter === 'function' && !filter(item)) return false;
-        const text = item.text().toUpperCase();
-        if (searchTexts.some(t => !text.includes(t))) return false;
-        return true;
-      },
-    });
-    if (items.length === 0) {
-      renderTip(layer, i18n.searchEmptyResult);
-      return;
-    }
-    render(layer, items);
-  };
-
+  //#endregion
+  //#region @require yaofang://content/ruleset/dialog.js
   /**
-   * @param {Element} inner
-   * @param {Array<Tab>} tabs
+   * 这个文件用于显示一个显示了若干条规则的对话框
    */
-  const renderTabs = function (inner, tabs, { initial = null, filter = null } = {}) {
-    inner.classList.add('yawf-config-inner');
-    const left = inner.appendChild(configDom.left());
-    const right = inner.appendChild(configDom.right());
+  ; (function () {
 
-    // 后续移除这段
-    const v7Tip = document.createElement('div');
-    v7Tip.innerHTML = '<div class="tip woo-box-flex woo-box-alignCenter woo-box-justifyCenter woo-tip-main woo-tip-flat woo-tip-error" style="padding: 10px;"><span class="woo-tip-text">药方（YAWF）针对微博新版（V7）的支持正在开发中！目前绝大多数功能暂不支持新版！！欢迎到 <a href="https://github.com/tiansh/yaofang" target="_blank" rel="noopener">项目主页</a> 贡献代码！</span></div>';
-    const text = v7Tip.querySelector('.woo-tip-text');
-    text.parentElement.insertBefore(ui.icon('error').documentElement, text).setAttribute('style', 'width: 32px; height: 32px;');
-    right.appendChild(v7Tip.firstChild);
+    const yawf = window.yawf;
+    const util = yawf.util;
 
-    const tablist = left.querySelector('ul');
-    const search = tablist.appendChild(configDom.search());
-    const searchInput = search.querySelector('input');
-    const renderTabs = tabs.filter(tab => tab.type === 'tab');
-    /** @type {Element?} */
-    let current = null;
-    /** @type {WeakMap<Element, Function>} */
-    const tabInit = new WeakMap();
-    const tabLayer = renderTabs.map(tab => {
-      const layer = right.appendChild(configDom.layer());
-      return layer;
+    const ui = util.ui;
+    const i18n = util.i18n;
+    const css = util.css;
+
+    const rule = yawf.rule;
+    const tabs = rule.tabs;
+
+    Object.assign(i18n, {
+      configDialogTitle: {
+        cn: '设置 - 药方 (YAWF)',
+        tw: '設定 - 藥方 (YAWF)',
+        en: 'Settings - YAWF (Yet Another Weibo Filter)',
+      },
+      searchEmptyInput: { cn: '键入以搜索设置项', tw: '鍵入以搜尋設定項', en: 'Type to search settings' },
+      searchEmptyResult: { cn: '未找到与您输入匹配的设置项', tw: '未找到與您輸入匹配的設置項', en: 'No Matched Settings' },
     });
-    const hideAllLayer = function () {
-      [...tabLayer, searchLayer].forEach(layer => {
-        if (layer.style.display !== 'none') {
-          layer.style.display = 'none';
+
+    /** @type {{ [e: string]: () => HTMLElement }} */
+    const configDom = {};
+    configDom.left = () => {
+      const container = document.createElement('div');
+      container.innerHTML = '<div class="yawf-config-header"><ul class="woo-box-flex woo-tab-nav"></ul></div>';
+      return container.removeChild(container.firstChild);
+    };
+    configDom.search = () => {
+      const container = document.createElement('ul');
+      container.innerHTML = '<li class="woo-tab-item-main yawf-config-tab yawf-config-tab-search"><label><input id="yawf-config-search" class="woo-input-main yawf-config-search" type="search"><i data-v-2621="" class="woo-font icon woo-font--search yawf-config-search-logo"></i></label></li>';
+      return container.removeChild(container.firstChild);
+    };
+    configDom.item = title => {
+      const container = document.createElement('ul');
+      container.innerHTML = '<li class="woo-tab-item-main yawf-config-tab"><button></button></li>';
+      const text = container.querySelector('button');
+      text.appendChild(title);
+      return container.removeChild(container.firstChild);
+    };
+    configDom.right = () => {
+      const container = document.createElement('div');
+      container.innerHTML = '<div class="yawf-config-body yawf-window-body"></div>';
+      return container.removeChild(container.firstChild);
+    };
+    configDom.layer = () => {
+      const container = document.createElement('div');
+      container.innerHTML = '<div class="yawf-config-layer"></div>';
+      return container.removeChild(container.firstChild);
+    };
+
+    const renderTip = (layer, text) => {
+      layer.innerHTML = '<div class="woo-tip-main woo-tip-vertical yawf-empty-tip"><span class="woo-tip-icon woo-tip-warnFill yawf-empty-tip-icon"></span><span class="woo-tip-text yawf-tip-text"></p></div>';
+      layer.querySelector('.woo-tip-icon').appendChild(ui.icon('warn').documentElement).setAttribute('class', 'woo-tip-icon');
+      layer.querySelector('.yawf-tip-text').textContent = text;
+    };
+
+    const renderSearch = (layer, input, filter) => {
+      const searchTexts = (input.match(/\S+/g) || []).filter(x => !x.includes(':')).map(t => t.toUpperCase());
+      const [_verMatch, verOp, verNum] = input.match(/\bver(?:sion)?:([><]?=?)(\d+)\b/) || [];
+      const versionTest = {
+        '>': v => v > verNum,
+        '<': v => v < verNum,
+        '>=': v => v >= verNum,
+        '<=': v => v <= verNum,
+        '=': v => v === +verNum,
+        '': v => v === +verNum,
+      }[verOp] ?? (() => true);
+      layer.innerHTML = '';
+      if (!searchTexts.length && verNum == null) {
+        renderTip(layer, i18n.searchEmptyInput);
+        return;
+      }
+      const items = rule.query({
+        filter: function (item) {
+          if (!item.version) return false;
+          if (!versionTest(item.version)) return false;
+          if (typeof filter === 'function' && !filter(item)) return false;
+          const text = item.text().toUpperCase();
+          if (searchTexts.some(t => !text.includes(t))) return false;
+          return true;
+        },
+      });
+      if (items.length === 0) {
+        renderTip(layer, i18n.searchEmptyResult);
+        return;
+      }
+      render(layer, items);
+    };
+
+    /**
+     * @param {Element} inner
+     * @param {Array<Tab>} tabs
+     */
+    const renderTabs = function (inner, tabs, { initial = null, filter = null } = {}) {
+      inner.classList.add('yawf-config-inner');
+      const left = inner.appendChild(configDom.left());
+      const right = inner.appendChild(configDom.right());
+
+      // 后续移除这段
+      const v7Tip = document.createElement('div');
+      v7Tip.innerHTML = '<div class="tip woo-box-flex woo-box-alignCenter woo-box-justifyCenter woo-tip-main woo-tip-flat woo-tip-error" style="padding: 10px;"><span class="woo-tip-text">药方（YAWF）针对微博新版（V7）的支持正在开发中！目前绝大多数功能暂不支持新版！！欢迎到 <a href="https://github.com/tiansh/yaofang" target="_blank" rel="noopener">项目主页</a> 贡献代码！</span></div>';
+      const text = v7Tip.querySelector('.woo-tip-text');
+      text.parentElement.insertBefore(ui.icon('error').documentElement, text).setAttribute('style', 'width: 32px; height: 32px;');
+      right.appendChild(v7Tip.firstChild);
+
+      const tablist = left.querySelector('ul');
+      const search = tablist.appendChild(configDom.search());
+      const searchInput = search.querySelector('input');
+      const renderTabs = tabs.filter(tab => tab.type === 'tab');
+      /** @type {Element?} */
+      let current = null;
+      /** @type {WeakMap<Element, Function>} */
+      const tabInit = new WeakMap();
+      const tabLayer = renderTabs.map(tab => {
+        const layer = right.appendChild(configDom.layer());
+        return layer;
+      });
+      const hideAllLayer = function () {
+        [...tabLayer, searchLayer].forEach(layer => {
+          if (layer.style.display !== 'none') {
+            layer.style.display = 'none';
+          }
+        });
+      };
+      const tabLeft = renderTabs.map((tab, index) => {
+        const layer = tabLayer[index];
+        const tabLeft = tablist.appendChild(configDom.item(tab.getRenderResult()));
+        tabInit.set(tabLeft, () => {
+          hideAllLayer();
+          layer.innerHTML = '';
+          render(layer, rule.query({ base: [tab], filter }));
+          layer.style.display = 'block';
+        });
+        return tabLeft;
+      });
+      const searchLayer = right.appendChild(configDom.layer());
+      searchLayer.classList.add('yawf-config-layer-search');
+      tabInit.set(search, () => {
+        hideAllLayer();
+        searchLayer.innerHTML = '';
+        renderSearch(searchLayer, searchInput.value, filter);
+        searchLayer.style.display = 'block';
+      });
+      const setCurrent = tabLeft => {
+        if (current === tabLeft) return;
+        const currentClassName = 'woo-tab-active';
+        if (current) current.classList.remove('yawf-current', currentClassName);
+        current = tabLeft;
+        tabLeft.classList.add('yawf-current', currentClassName);
+        if (search !== tabLeft && searchInput.value) searchInput.value = '';
+        tabInit.get(tabLeft)();
+        right.scrollTo(0, 0);
+      };
+      // 自动选中目标选项卡，或第一个选项卡
+      setCurrent(tabLeft[(initial && renderTabs.indexOf(initial) + 1 || 1) - 1]);
+      left.addEventListener('click', event => {
+        const tabLeft = event.target.closest('.yawf-config-tab');
+        if (!tabLeft) return;
+        if (tabLeft === search) return;
+        setCurrent(tabLeft);
+      });
+      // 当在搜索框里面输入内容的时候，选中搜索框并刷新结果
+      searchInput.addEventListener('input', event => {
+        if (!searchInput.value && current !== search) return;
+        if (current !== search) setCurrent(search);
+        else tabInit.get(search)();
+      });
+    };
+
+    const render = function (inner, items) {
+      const groups = new Map();
+      items.forEach(item => {
+        if (!groups.has(item.parent)) {
+          groups.set(item.parent, []);
+        }
+        groups.get(item.parent).push(item);
+      });
+      [...groups.entries()].forEach(([group, items]) => {
+        try {
+          inner.appendChild(group.getRenderResult());
+          const container = document.createElement('div');
+          container.classList.add('yawf-config-group-items');
+          items.forEach(item => {
+            let node = item.getRenderResult();
+            container.appendChild(node);
+          });
+          inner.appendChild(container);
+        } catch (e) {
+          util.debug('Error while render config list:', e);
         }
       });
     };
-    const tabLeft = renderTabs.map((tab, index) => {
-      const layer = tabLayer[index];
-      const tabLeft = tablist.appendChild(configDom.item(tab.getRenderResult()));
-      tabInit.set(tabLeft, () => {
-        hideAllLayer();
-        layer.innerHTML = '';
-        render(layer, rule.query({ base: [tab], filter }));
-        layer.style.display = 'block';
-      });
-      return tabLeft;
-    });
-    const searchLayer = right.appendChild(configDom.layer());
-    searchLayer.classList.add('yawf-config-layer-search');
-    tabInit.set(search, () => {
-      hideAllLayer();
-      searchLayer.innerHTML = '';
-      renderSearch(searchLayer, searchInput.value, filter);
-      searchLayer.style.display = 'block';
-    });
-    const setCurrent = tabLeft => {
-      if (current === tabLeft) return;
-      const currentClassName = 'woo-tab-active';
-      if (current) current.classList.remove('yawf-current', currentClassName);
-      current = tabLeft;
-      tabLeft.classList.add('yawf-current', currentClassName);
-      if (search !== tabLeft && searchInput.value) searchInput.value = '';
-      tabInit.get(tabLeft)();
-      right.scrollTo(0, 0);
-    };
-    // 自动选中目标选项卡，或第一个选项卡
-    setCurrent(tabLeft[(initial && renderTabs.indexOf(initial) + 1 || 1) - 1]);
-    left.addEventListener('click', event => {
-      const tabLeft = event.target.closest('.yawf-config-tab');
-      if (!tabLeft) return;
-      if (tabLeft === search) return;
-      setCurrent(tabLeft);
-    });
-    // 当在搜索框里面输入内容的时候，选中搜索框并刷新结果
-    searchInput.addEventListener('input', event => {
-      if (!searchInput.value && current !== search) return;
-      if (current !== search) setCurrent(search);
-      else tabInit.get(search)();
-    });
-  };
+    rule.render = render;
 
-  const render = function (inner, items) {
-    const groups = new Map();
-    items.forEach(item => {
-      if (!groups.has(item.parent)) {
-        groups.set(item.parent, []);
-      }
-      groups.get(item.parent).push(item);
-    });
-    [...groups.entries()].forEach(([group, items]) => {
+    rule.dialog = function (tab = null, filter = null) {
       try {
-        inner.appendChild(group.getRenderResult());
-        const container = document.createElement('div');
-        container.classList.add('yawf-config-group-items');
-        items.forEach(item => {
-          let node = item.getRenderResult();
-          container.appendChild(node);
-        });
-        inner.appendChild(container);
-      } catch (e) {
-        util.debug('Error while render config list:', e);
-      }
-    });
-  };
-  rule.render = render;
+        ui.dialog({
+          id: 'yawf-config',
+          title: i18n.configDialogTitle,
+          render: inner => {
+            renderTabs(inner, tabs, { initial: tab, filter });
+          },
+          bar: true,
+        }).show();
+      } catch (e) { util.debug('Error while showing rule dialog %o', e); }
+    };
 
-  rule.dialog = function (tab = null, filter = null) {
-    try {
-      ui.dialog({
-        id: 'yawf-config',
-        title: i18n.configDialogTitle,
-        render: inner => {
-          renderTabs(inner, tabs, { initial: tab, filter });
-        },
-        bar: true,
-      }).show();
-    } catch (e) { util.debug('Error while showing rule dialog %o', e); }
-  };
-
-  css.append(`
+    css.append(`
 #yawf-config { width: 800px; font-size: 14px; }
 #yawf-config .yawf-config-inner { padding: 0 0 0 160px; width: 640px; height: 480px; position: relative; }
 #yawf-config .yawf-config-header { position: absolute; width: 160px; height: 480px; top: 0; left: 0; }
@@ -6689,7 +6977,7 @@ article[class*="Feed"].yawf-feed-filter-running::before { content: " "; display:
 #yawf-config .yawf-empty-tip-icon { display: block; margin: 0 auto 20px; padding-top: 150px; }
 `);
 
-}());
+  }());
 //#endregion
 //#region @require yaofang://content/ruleset/menu.js
 ; (function () {
@@ -18746,7 +19034,7 @@ body[yawf-feed-only] .WB_frame { padding-left: 0; }
         //   title: i18n.weiboVersionTitle,
         //   text: yawf.WEIBO_VERSION === 6 ? i18n.weiboVersion7To6 : i18n.weiboVersion6To7,
         // }).then(() => {
-          this.ref.lastWeibo.setConfig(yawf.WEIBO_VERSION);
+        this.ref.lastWeibo.setConfig(yawf.WEIBO_VERSION);
         // });
       } else if (!lastWeiboVersion) {
         this.ref.lastWeibo.setConfig(yawf.WEIBO_VERSION);
@@ -19084,6 +19372,9 @@ body[yawf-feed-only] .WB_frame { padding-left: 0; }
 // 这个文件用于向界面上添加菜单项
 ; (function () {
   const yawf = window.yawf;
+  if (!yawf) {
+    return;
+  }
   const util = yawf.util;
   const init = yawf.init;
   const rule = yawf.rule;
@@ -19094,32 +19385,128 @@ body[yawf-feed-only] .WB_frame { padding-left: 0; }
     } catch (e) { util.debug('Error while prompting dialog: %o', e); }
   };
 
-  init.onLoad(() => {
-    util.inject(function (rootKey, showRuleDialog) {
-      const yawf = window[rootKey];
-      const vueSetup = yawf.vueSetup;
+  const ensureEntry = function () {
+    if (ensureEntry.started) return;
+    ensureEntry.started = true;
 
-      vueSetup.eachComponentVM('weibo-top-nav', function (vm) {
-        vm.configs.splice(-1, 0, {
-          divider: true,
-          href: '',
-          name: '药方设置',
-          type: 'yawf-config',
+    const ENTRY_FAB_ID = 'yawf-entry-fab';
+    const ENTRY_ITEM_CLASS = 'yawf-settings-item';
+
+    util.css.append(`
+#${ENTRY_FAB_ID} {
+  position: fixed;
+  right: 16px;
+  bottom: 24px;
+  z-index: 2147483647;
+  width: 44px;
+  height: 44px;
+  border: none;
+  border-radius: 999px;
+  padding: 0;
+  cursor: pointer;
+  user-select: none;
+  background: var(--w-brand, #ff8200);
+  color: #fff;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.25);
+  font: 700 12px/44px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'Noto Sans', 'Liberation Sans', sans-serif;
+  letter-spacing: 0.2px;
+}
+#${ENTRY_FAB_ID}:hover { filter: brightness(1.05); }
+#${ENTRY_FAB_ID}:active { transform: translateY(1px); }
+`);
+
+    const ensureFab = function () {
+      if (document.getElementById(ENTRY_FAB_ID)) return;
+      const button = document.createElement('button');
+      button.id = ENTRY_FAB_ID;
+      button.type = 'button';
+      button.title = '药方设置';
+      button.textContent = 'YAWF';
+      button.addEventListener('click', event => {
+        if (!event.isTrusted) return;
+        event.preventDefault();
+        event.stopPropagation();
+        showRuleDialog();
+      }, true);
+      (document.body || document.documentElement).appendChild(button);
+    };
+
+    const tryInjectWeiboV7SettingsItem = function () {
+      const keywords = [
+        '无障碍', 'Accessibility',
+        '夜间模式', 'Night Mode',
+        '退出登录', 'Sign out', '登出',
+        '设置', 'Setting',
+      ];
+
+      /** @type {NodeListOf<Element>} */
+      const popMains = document.querySelectorAll('div.woo-pop-wrap-main');
+      for (const popMain of popMains) {
+        if (popMain.querySelector('.' + ENTRY_ITEM_CLASS)) continue;
+        const buttons = [...popMain.querySelectorAll('button, a')];
+        if (!buttons.length) continue;
+
+        const looksLikeSettingsMenu = buttons.some(btn => {
+          const text = (btn.textContent || '').replace(/\s+/g, ' ').trim();
+          return keywords.some(k => text.includes(k));
         });
-        vm.configHandle = (function (configHandle) {
-          return function (index) {
-            if (this.configs[index].type === 'yawf-config') {
-              this.configClose = true;
-              showRuleDialog();
-            } else {
-              configHandle.call(this, index);
-            }
-          }.bind(vm);
-        }(vm.configHandle));
-      });
-    }, util.inject.rootKey, showRuleDialog);
-  });
+        if (!looksLikeSettingsMenu) continue;
+
+        const styleAnchor = buttons.find(btn => (btn.textContent || '').includes('写微博')) ||
+          buttons.find(btn => (btn.textContent || '').includes('设置')) ||
+          buttons[0];
+
+        /** @type {HTMLElement} */
+        const yawfItem = /** @type {HTMLElement} */(styleAnchor.cloneNode(true));
+        yawfItem.classList.add(ENTRY_ITEM_CLASS);
+        yawfItem.removeAttribute('href');
+        yawfItem.removeAttribute('target');
+        yawfItem.removeAttribute('rel');
+        yawfItem.removeAttribute('id');
+        yawfItem.title = '药方设置';
+        yawfItem.textContent = '药方设置';
+        yawfItem.addEventListener('click', event => {
+          if (!event.isTrusted) return;
+          event.preventDefault();
+          event.stopPropagation();
+          // Best-effort close popover
+          try { document.body?.click(); } catch (e) { /* */ }
+          showRuleDialog();
+        }, true);
+
+        // Put the item near the end, but before possible “Sign out”
+        const signOut = buttons.find(btn => /退出登录|Sign out|登出/.test(btn.textContent || ''));
+        if (signOut?.parentElement?.parentElement === popMain) {
+          popMain.insertBefore(yawfItem, signOut.parentElement);
+        } else if (signOut?.parentElement === popMain) {
+          popMain.insertBefore(yawfItem, signOut);
+        } else {
+          popMain.appendChild(yawfItem);
+        }
+      }
+    };
+
+    let scheduled = false;
+    const schedule = function () {
+      if (scheduled) return;
+      scheduled = true;
+      setTimeout(() => {
+        scheduled = false;
+        try { ensureFab(); } catch (e) { /* */ }
+        try { tryInjectWeiboV7SettingsItem(); } catch (e) { /* */ }
+      }, 50);
+    };
+
+    schedule();
+    const observer = new MutationObserver(schedule);
+    observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true });
+  };
+  ensureEntry.started = false;
+
+  // Do not rely on `init` / `util.inject` for the entry, because Weibo V7 pages may block
+  // page-context injection or config hook, leaving `init.onLoad` never triggered.
+  ensureEntry();
+  if (typeof init?.onLoad === 'function') init.onLoad(() => { ensureEntry(); });
 
 }());
 //#endregion
-
