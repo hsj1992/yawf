@@ -3155,31 +3155,31 @@ html { background: #f9f9fa; }
 	        return true;
 	      });
 	    };
-	    const eachComponentVM = function (tag, callback, { mounted = true, watch = true } = {}) {
-	      let error = false;
-	      const cb = function (vm) {
-	        try {
-          callback(vm);
-        } catch (e) {
-          if (!error) {
-            console.error('Error while running eachCompontentVM callback %o:\n%o', callback, e);
-          }
-          error = true;
-        }
-	      };
-	      if (mounted) {
-	        const exact = getComponentsByTagName(tag);
-	        if (exact.length) exact.forEach(cb);
-	        else getComponentsByTagNameFuzzy(tag).forEach(cb);
-	      }
-	      if (watch) {
-	        if (getComponentsByTagName(tag).length) {
-	          watchComponentVM(tag, cb);
-	        } else {
-	          watchComponentVMFuzzy(tag, cb);
-	        }
-	      }
-	    };
+		    const eachComponentVM = function (tag, callback, { mounted = true, watch = true } = {}) {
+		      let error = false;
+		      const seen = new WeakSet();
+		      const cb = function (vm) {
+		        if (!vm || seen.has(vm)) return;
+		        seen.add(vm);
+		        try {
+		          callback(vm);
+		        } catch (e) {
+		          if (!error) {
+		            console.error('Error while running eachCompontentVM callback %o:\n%o', callback, e);
+		          }
+		          error = true;
+		        }
+		      };
+		      if (mounted) {
+		        getComponentsByTagNameFuzzy(tag).forEach(cb);
+		        getComponentsByTagName(tag).forEach(cb);
+		      }
+		      if (watch) {
+		        // Always register fuzzy watcher to survive tag name changes after SPA navigation.
+		        watchComponentVMFuzzy(tag, cb);
+		        watchComponentVM(tag, cb);
+		      }
+		    };
 
     // Vue 3 辅助函数
     const getVue3InternalFromNode = function (node) {
