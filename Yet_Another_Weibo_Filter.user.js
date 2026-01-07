@@ -12,7 +12,7 @@
 // @description:zh-TW Yet Another Weibo Filter (YAWF) 新浪微博根據關鍵詞、作者、話題、來源等篩選微博；修改版面
 // @description:en    Sina Weibo feed filter by keywords, authors, topics, source, etc.; Modifying webpage layout
 // @namespace         https://github.com/tiansh
-// @version           5.0.110-dev.20260107a13.debug
+// @version           5.0.110-dev.20260107a15.debug
 // @match             *://*.weibo.com/*
 // @match             *://t.cn/*
 // @include           *://weibo.com/*
@@ -3223,30 +3223,42 @@ html { background: #f9f9fa; }
       const internal = getVue3InternalFromVm(publicVm);
       rootVm = publicVm;
       const route = routeReportObject(publicVm);
-      // 只序列化config中必需的字段,避免触发problematic的computed属性
+      // 只序列化 config 中必需的字段，避免触发 problematic 的 computed 属性
       let configJson = '{}';
       try {
         // 尝试从多个可能的位置获取用户信息
         let user = null;
-        const fullConfig = isVue2Vm(publicVm) ? publicVm.config : internal?.appContext?.config;
+        const vueApp = node && node.__vue_app__;
+        const appContext = isVue2Vm(publicVm) ? null : (vueApp?._context || internal?.appContext || null);
+        const fullConfig = isVue2Vm(publicVm) ? publicVm.config : appContext?.config;
+        const globalProperties = fullConfig?.globalProperties;
+        const store = publicVm?.$store || globalProperties?.$store || appContext?.provides?.store || null;
 
         // 尝试从globalProperties.$CONFIG获取
-        if (fullConfig?.globalProperties?.$CONFIG?.user) {
-          user = fullConfig.globalProperties.$CONFIG.user;
+        if (globalProperties?.$CONFIG?.user) {
+          user = globalProperties.$CONFIG.user;
         }
-        // 尝试从$store获取
-        else if (publicVm?.$store?.state?.user) {
-          user = publicVm.$store.state.user;
+        // 尝试从 $store 获取（微博 V7 的用户信息位置会变化）
+        else if (store?.state) {
+          user = (
+            store.state.user ||
+            store.state.userInfo ||
+            store.state.userinfo ||
+            store.state?.config?.user ||
+            store.state?.config?.config?.user ||
+            store.state?.common?.user ||
+            null
+          );
         }
 
         console.log('[YAWF DEBUG] found user:', user);
-        console.log('[YAWF DEBUG] globalProperties:', fullConfig?.globalProperties);
+        console.log('[YAWF DEBUG] globalProperties keys:', globalProperties ? Reflect.ownKeys(globalProperties) : null);
 
         if (user) {
           const minimalConfig = {
             user: {
               idstr: user.idstr || user.id?.toString(),
-              screen_name: user.screen_name || user.name,
+              screen_name: user.screen_name || user.name || user.nick,
               id: user.id,
             }
           };
@@ -6924,13 +6936,27 @@ article[class*="Feed"].yawf-feed-filter-running::before { content: " "; display:
       });
       [...groups.entries()].forEach(([group, items]) => {
         try {
-          inner.appendChild(group.getRenderResult());
+          const rendered = [];
           const container = document.createElement('div');
           container.classList.add('yawf-config-group-items');
           items.forEach(item => {
-            let node = item.getRenderResult();
-            container.appendChild(node);
+            try {
+              const node = item.getRenderResult();
+              if (node instanceof Node) {
+                rendered.push(node);
+              } else if (typeof node === 'function') {
+                const placeholder = document.createElement('span');
+                placeholder.classList.add('yawf-config-item');
+                node(placeholder);
+                rendered.push(placeholder);
+              }
+            } catch (e) {
+              util.debug('Error while render config item %o: %o', item, e);
+            }
           });
+          if (!rendered.length) return;
+          inner.appendChild(group.getRenderResult());
+          rendered.forEach(node => container.appendChild(node));
           inner.appendChild(container);
         } catch (e) {
           util.debug('Error while render config list:', e);
