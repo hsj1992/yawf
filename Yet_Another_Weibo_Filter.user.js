@@ -3161,15 +3161,16 @@ html { background: #f9f9fa; }
 		      const cb = function (vm) {
 		        if (!vm || seen.has(vm)) return;
 		        seen.add(vm);
-		        try {
-		          callback(vm);
-		        } catch (e) {
-		          if (!error) {
-		            console.error('Error while running eachCompontentVM callback %o:\n%o', callback, e);
-		          }
-		          error = true;
-		        }
-		      };
+			        try {
+			          callback(vm);
+			        } catch (e) {
+			          if (!error) {
+			            const errorText = e && (e.stack || e.message) ? (e.stack || e.message) : String(e);
+			            console.error('Error while running eachComponentVM(%s) callback:\n%s', tag, errorText);
+			          }
+			          error = true;
+			        }
+			      };
 		      if (mounted) {
 		        getComponentsByTagNameFuzzy(tag).forEach(cb);
 		        getComponentsByTagName(tag).forEach(cb);
@@ -3582,12 +3583,24 @@ html { background: #f9f9fa; }
       });
     }
 
-	    Object.defineProperty(window, rootKey, { value: {}, enumerable: false, writable: false });
-	    const yawf = window[rootKey];
-	    const vueSetup = yawf.vueSetup = yawf.vueSetup ?? {};
-	    debugLog('vueSetup initialized, rootKey:', rootKey);
+		    Object.defineProperty(window, rootKey, { value: {}, enumerable: false, writable: false });
+		    const yawf = window[rootKey];
+		    const vueSetup = yawf.vueSetup = yawf.vueSetup ?? {};
+		    debugLog('vueSetup initialized, rootKey:', rootKey);
 
-    vueSetup.getRootVm = () => rootVm;
+	    vueSetup.safeDefineProperty = function (target, prop, descriptor) {
+	      try {
+	        if (!target) return false;
+	        const current = Object.getOwnPropertyDescriptor(target, prop);
+	        if (current && current.configurable === false) return false;
+	        if (!current && !Object.isExtensible(target)) return false;
+	        return Reflect.defineProperty(target, prop, Object.assign({ configurable: true }, descriptor));
+	      } catch (e) {
+	        return false;
+	      }
+	    };
+
+	    vueSetup.getRootVm = () => rootVm;
 
     vueSetup.kebabCase = kebabCase;
 
@@ -6520,12 +6533,13 @@ article[class*="Feed"].yawf-feed-filter-running::before { content: " "; display:
         vm.$forceUpdate();
       });
       let heightIndex = 0;
-      vueSetup.eachComponentVM('scroll', function (vm) {
-        const wrapRaf = function (f) {
-          let dirty = false;
-          return function () {
-            if (dirty) return;
-            dirty = true;
+	      vueSetup.eachComponentVM('scroll', function (vm) {
+	        if (!vm?.$scopedSlots?.content || typeof vm.$scopedSlots.content !== 'function') return;
+	        const wrapRaf = function (f) {
+	          let dirty = false;
+	          return function () {
+	            if (dirty) return;
+	            dirty = true;
             requestAnimationFrame(function () {
               dirty = false;
               f();
@@ -6563,14 +6577,15 @@ article[class*="Feed"].yawf-feed-filter-running::before { content: " "; display:
             const item = getItemFromSensor(container);
             if (item) item._yawf_Height = container.clientHeight;
           });
-        });
-        vm.$scopedSlots.content = (function (content) {
-          return function (data) {
-            const createElement = vm._self._c, h = createElement;
-            const raw = content.call(this, data);
-            // 给每个元素一个唯一的标识用于对应高度检测器
-            // 我们没办法用现成的 mid 或 comment_id，因为我们并不知道元素是什么类型
-            // 元素有可能是 feed，但也有可能是其他任何东西
+	        });
+	        vm.$scopedSlots.content = (function (content) {
+	          return function (data) {
+	            if (!data?.item) return content.call(this, data);
+	            const createElement = vm._self._c, h = createElement;
+	            const raw = content.call(this, data);
+	            // 给每个元素一个唯一的标识用于对应高度检测器
+	            // 我们没办法用现成的 mid 或 comment_id，因为我们并不知道元素是什么类型
+	            // 元素有可能是 feed，但也有可能是其他任何东西
             if (!data.item._yawf_HeightIndex) {
               data.item._yawf_HeightIndex = ++heightIndex;
             }
@@ -6646,12 +6661,19 @@ article[class*="Feed"].yawf-feed-filter-running::before { content: " "; display:
           }
         });
       };
-      vueSetup.eachComponentVM('feed-scroll', function (vm) {
-        vm.$options.beforeUpdate.push(onBeforeUpdate);
-        onBeforeUpdate();
-      });
-    }, util.inject.rootKey, key);
-  }, { priority: priority.LAST });
+	      vueSetup.eachComponentVM('feed-scroll', function (vm) {
+	        if (!vm.$options.beforeUpdate) {
+	          vm.$options.beforeUpdate = [];
+	        } else if (!Array.isArray(vm.$options.beforeUpdate)) {
+	          vm.$options.beforeUpdate = [vm.$options.beforeUpdate];
+	        }
+	        if (!vm.$options.beforeUpdate.includes(onBeforeUpdate)) {
+	          vm.$options.beforeUpdate.push(onBeforeUpdate);
+	        }
+	        onBeforeUpdate();
+	      });
+	    }, util.inject.rootKey, key);
+	  }, { priority: priority.LAST });
 
 }());
 
@@ -6750,12 +6772,12 @@ article[class*="Feed"].yawf-feed-filter-running::before { content: " "; display:
       vueSetup.eachComponentVM('repost-coment-list', vm => {
         vm.$watch('list', handleCommentList, { immediate: true, deep: true })
       });
-      vueSetup.eachComponentVM('feed', vm => {
-        if (!vm.data.rcList) return;
-        vm.$watch('data.rcList', rcList => {
-          handleCommentList(rcList);
-        }, { immediate: true, deep: true });
-      });
+	      vueSetup.eachComponentVM('feed', vm => {
+	        if (!vm?.data?.rcList) return;
+	        vm.$watch('data.rcList', rcList => {
+	          handleCommentList(rcList);
+	        }, { immediate: true, deep: true });
+	      });
       vueSetup.eachComponentVM('reply-modal', vm => {
         if (!vm.rootComment) return;
         vm.$watch('rootComment', rootComment => {
@@ -12100,20 +12122,20 @@ img[src*="vvip_"] { display: none !important; }
   clean.CleanGroup('nav', () => i18n.cleanNavGroupTitle);
   clean.CleanRule('logo_img', () => i18n.cleanNavLogoImg, 1, {
     v7Support: true,
-    ainit: function () {
-      util.inject(function (rootKey) {
-        const yawf = window[rootKey];
-        const vueSetup = yawf.vueSetup;
+	    ainit: function () {
+	      util.inject(function (rootKey) {
+	        const yawf = window[rootKey];
+	        const vueSetup = yawf.vueSetup;
 
-        vueSetup.eachComponentVM('weibo-top-nav', function (vm) {
-          Object.defineProperty(vm, 'skinData', { get: () => ({}) });
-        });
-        vueSetup.eachComponentVM('weibo-top-nav-base', function (vm) {
-          Object.defineProperty(vm, 'logoUrl', { get: () => null, set: x => { } });
-        });
-      }, util.inject.rootKey);
-    },
-  });
+	        vueSetup.eachComponentVM('weibo-top-nav', function (vm) {
+	          vueSetup.safeDefineProperty(vm, 'skinData', { get: () => ({}) });
+	        });
+	        vueSetup.eachComponentVM('weibo-top-nav-base', function (vm) {
+	          vueSetup.safeDefineProperty(vm, 'logoUrl', { get: () => null, set: () => { } });
+	        });
+	      }, util.inject.rootKey);
+	    },
+	  });
   clean.CleanRuleGroup({
     home: clean.CleanRule('main', () => i18n.cleanNavMain, 1, '', { v7Support: true }),
     tv: clean.CleanRule('tv', () => i18n.cleanNavTV, 1, '', { v7Support: true }),
@@ -12125,22 +12147,31 @@ img[src*="vvip_"] { display: none !important; }
       const yawf = window[rootKey];
       const vueSetup = yawf.vueSetup;
 
-      vueSetup.eachComponentVM('weibo-top-nav', function (vm) {
-        if (Array.isArray(vm.channels)) {
-          const filtered = vm.channels.filter(channel => !options[channel.name]);
-          vm.channels.splice(0, vm.channels.length, ...filtered);
-        }
-        let links = vm.links;
-        if (!Object.getOwnPropertyDescriptor(vm, 'links')?.get) {
-          Object.defineProperty(vm, 'links', {
-            get() { return links.filter(link => !options[link.name]); },
-            set(v) { links = v; },
-          });
-        }
-      });
+	      vueSetup.eachComponentVM('weibo-top-nav', function (vm) {
+	        if (Array.isArray(vm.channels)) {
+	          const filtered = vm.channels.filter(channel => {
+	            const name = channel?.name;
+	            return !name || !options[name];
+	          });
+	          vm.channels.splice(0, vm.channels.length, ...filtered);
+	        }
+	        let links = vm.links;
+	        const linksDesc = Object.getOwnPropertyDescriptor(vm, 'links');
+	        if (!linksDesc?.get) {
+	          vueSetup.safeDefineProperty(vm, 'links', {
+	            get() {
+	              return (Array.isArray(links) ? links : []).filter(link => {
+	                const name = link?.name;
+	                return !name || !options[name];
+	              });
+	            },
+	            set(v) { links = v; },
+	          });
+	        }
+	      });
 
-    }, util.inject.rootKey, options);
-  });
+	    }, util.inject.rootKey, options);
+	  });
   if (env.config.requestBlockingSupported) {
     clean.CleanRule('hot_search', () => i18n.cleanNavHotSearch, 1, {
       init: function () {
