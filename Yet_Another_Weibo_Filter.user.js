@@ -185,13 +185,6 @@
 
 }());
 //#endregion
-//#region YAWF Debug Logger
-; (function () {
-  console.log('[YAWF DEBUG] Script started at', new Date().toISOString());
-  console.log('[YAWF DEBUG] Location:', location.href);
-  console.log('[YAWF DEBUG] Top frame:', top === self);
-}());
-//#endregion
 //#region custom implementation interests
 /**
  * 基本上没有用户会对兴趣推荐感兴趣
@@ -343,16 +336,16 @@
   const util = yawf.util = yawf.util ?? {};
 
   const prefix = env.config.consolePrefix;
-  const pending = [];
-  const pendingOutput = (...args) => { pending.push(args); };
-  const output = (message, ...args) => {
-    if (typeof message === 'string') {
-      console.log(`${prefix} | ${message}`, ...args);
-    } else if (message !== void 0) {
-      console.log(`${prefix} |`, message, ...args);
-    }
-  };
-  const noop = () => { };
+	  const pending = [];
+	  const pendingOutput = (...args) => { pending.push(args); };
+	  const output = (message, ...args) => {
+	    if (typeof message === 'string') {
+	      console.info(`${prefix} | ${message}`, ...args);
+	    } else if (message !== void 0) {
+	      console.info(`${prefix} |`, message, ...args);
+	    }
+	  };
+	  const noop = () => { };
 
   let debug = pendingOutput;
   let debugEnabled = null;
@@ -705,7 +698,6 @@
   };
 
   util.inject = function (func, ...params) {
-    console.log('[YAWF DEBUG] util.inject called with function:', func.name || 'anonymous');
     if (typeof func !== 'function') return Promise.reject();
     const setupScript = firstCall ? `(${init}(${JSON.stringify([baseKey, replyKey])}));` : ''; firstCall = false;
     const executeScript = setupScript + `window[${JSON.stringify(baseKey)}](${func},${serialize(params)});`;
@@ -3059,11 +3051,11 @@ html { background: #f9f9fa; }
       const config = JSON.parse(event.detail.config);
       init.configChange(config);
     }
-  }, true);
+	  }, true);
 
-  util.inject(function (rootKey, key) {
-    console.log('[YAWF DEBUG] Injected vueSetup script started, rootKey:', rootKey);
-    let rootVm = null;
+	  util.inject(function (rootKey, key) {
+	    const debugLog = () => { };
+	    let rootVm = null;
 
     const kebabCase = function (word) {
       if (typeof word !== 'string') return word;
@@ -3074,8 +3066,10 @@ html { background: #f9f9fa; }
       });
     };
 
-    /** @type {Map<string, Set<() => void>>} */
-    const watchComponentVMCallbacks = new Map();
+	    /** @type {Map<string, Set<() => void>>} */
+	    const watchComponentVMCallbacks = new Map();
+	    /** @type {Map<string, Set<() => void>>} */
+	    const watchComponentVMFuzzyCallbacks = new Map();
     /** @type {Set<WeakSet<VM>>} */
     const allComponentVM = new WeakSet();
     /** @type {Map<string, Set<WeakRef<VM>>>} */
@@ -3083,12 +3077,22 @@ html { background: #f9f9fa; }
     const finalizeVm = new FinalizationRegistry((byTagName, ref) => {
       byTagName.delete(ref);
     });
-    // 发现任何 Vue 元素的时候上报消息以方便其他模块修改该元素
-    const reportNewVM = function (vm, node, replace) {
-      const tag = getTag(vm);
-      console.log('[YAWF DEBUG] reportNewVM called, tag:', tag);
-      if (allComponentVM.has(vm)) return;
-      allComponentVM.add(vm);
+	    const tagMatch = function (candidateTag, requestedTag) {
+	      if (!candidateTag || !requestedTag) return false;
+	      if (candidateTag === requestedTag) return true;
+	      if (candidateTag.startsWith(requestedTag + '-')) return true;
+	      if (candidateTag.endsWith('-' + requestedTag)) return true;
+	      if (candidateTag.includes('-' + requestedTag + '-')) return true;
+	      if (requestedTag.includes('-') && candidateTag.includes(requestedTag)) return true;
+	      return false;
+	    };
+
+	    // 发现任何 Vue 元素的时候上报消息以方便其他模块修改该元素
+		    const reportNewVM = function (vm, node, replace) {
+		      const tag = getTag(vm);
+		      debugLog('reportNewVM called, tag:', tag);
+		      if (allComponentVM.has(vm)) return;
+	      allComponentVM.add(vm);
 
       const ref = new WeakRef(vm);
       if (!allComponentVMByTagName.has(tag)) {
@@ -3098,35 +3102,63 @@ html { background: #f9f9fa; }
       byTagName.add(ref);
       finalizeVm.register(vm, byTagName, ref);
 
-      if (watchComponentVMCallbacks.has(tag)) {
-        [...watchComponentVMCallbacks.get(tag)].forEach(callback => {
-          callback(vm);
-        });
-      }
-    };
-    const watchComponentVM = function (tag, callback) {
-      if (!watchComponentVMCallbacks.has(tag)) {
-        watchComponentVMCallbacks.set(tag, new Set());
+	      if (watchComponentVMCallbacks.has(tag)) {
+	        [...watchComponentVMCallbacks.get(tag)].forEach(callback => {
+	          callback(vm);
+	        });
+	      }
+	      if (watchComponentVMFuzzyCallbacks.size) {
+	        [...watchComponentVMFuzzyCallbacks.entries()].forEach(([requestedTag, callbacks]) => {
+	          if (!tagMatch(tag, requestedTag)) return;
+	          [...callbacks].forEach(callback => {
+	            callback(vm);
+	          });
+	        });
+	      }
+	    };
+	    const watchComponentVM = function (tag, callback) {
+	      if (!watchComponentVMCallbacks.has(tag)) {
+	        watchComponentVMCallbacks.set(tag, new Set());
       }
       const callbacks = watchComponentVMCallbacks.get(tag);
       callbacks.add(callback);
       return function unwatch() {
         callbacks.delete(callback);
-        callback = null;
-      };
-    };
-    const getComponentsByTagName = function (tag) {
-      if (!allComponentVMByTagName.has(tag)) return [];
-      return [...allComponentVMByTagName.get(tag)].flatMap(ref => {
-        const vm = ref.deref();
+	        callback = null;
+	      };
+	    };
+	    const watchComponentVMFuzzy = function (tag, callback) {
+	      if (!watchComponentVMFuzzyCallbacks.has(tag)) {
+	        watchComponentVMFuzzyCallbacks.set(tag, new Set());
+	      }
+	      const callbacks = watchComponentVMFuzzyCallbacks.get(tag);
+	      callbacks.add(callback);
+	      return function unwatch() {
+	        callbacks.delete(callback);
+	        callback = null;
+	      };
+	    };
+	    const getComponentsByTagName = function (tag) {
+	      if (!allComponentVMByTagName.has(tag)) return [];
+	      return [...allComponentVMByTagName.get(tag)].flatMap(ref => {
+	        const vm = ref.deref();
         if (!vm || !isMountedVm(vm)) return [];
-        return [vm];
-      });
-    };
-    const eachComponentVM = function (tag, callback, { mounted = true, watch = true } = {}) {
-      let error = false;
-      const cb = function (vm) {
-        try {
+	        return [vm];
+	      });
+	    };
+	    const getComponentsByTagNameFuzzy = function (tag) {
+	      const matchedTags = [...allComponentVMByTagName.keys()].filter(t => tagMatch(t, tag));
+	      const seen = new WeakSet();
+	      return matchedTags.flatMap(t => getComponentsByTagName(t)).filter(vm => {
+	        if (!vm || seen.has(vm)) return false;
+	        seen.add(vm);
+	        return true;
+	      });
+	    };
+	    const eachComponentVM = function (tag, callback, { mounted = true, watch = true } = {}) {
+	      let error = false;
+	      const cb = function (vm) {
+	        try {
           callback(vm);
         } catch (e) {
           if (!error) {
@@ -3134,14 +3166,20 @@ html { background: #f9f9fa; }
           }
           error = true;
         }
-      };
-      if (mounted) {
-        getComponentsByTagName(tag).forEach(cb);
-      }
-      if (watch) {
-        watchComponentVM(tag, cb);
-      }
-    };
+	      };
+	      if (mounted) {
+	        const exact = getComponentsByTagName(tag);
+	        if (exact.length) exact.forEach(cb);
+	        else getComponentsByTagNameFuzzy(tag).forEach(cb);
+	      }
+	      if (watch) {
+	        if (getComponentsByTagName(tag).length) {
+	          watchComponentVM(tag, cb);
+	        } else {
+	          watchComponentVMFuzzy(tag, cb);
+	        }
+	      }
+	    };
 
     // Vue 3 辅助函数
     const getVue3InternalFromNode = function (node) {
@@ -3251,8 +3289,8 @@ html { background: #f9f9fa; }
           );
         }
 
-        console.log('[YAWF DEBUG] found user:', user);
-        console.log('[YAWF DEBUG] globalProperties keys:', globalProperties ? Reflect.ownKeys(globalProperties) : null);
+	        debugLog('found user:', user);
+	        debugLog('globalProperties keys:', globalProperties ? Reflect.ownKeys(globalProperties) : null);
 
         if (user) {
           const minimalConfig = {
@@ -3267,7 +3305,7 @@ html { background: #f9f9fa; }
       } catch (e) {
         console.warn('[YAWF] Error extracting config:', e);
       }
-      console.log('[YAWF DEBUG] dispatching event, configJson:', configJson);
+	      debugLog('dispatching event, configJson:', configJson);
       const event = new CustomEvent(key, {
         detail: {
           config: configJson,
@@ -3303,16 +3341,13 @@ html { background: #f9f9fa; }
       const name = type?.name || type?.__name || type?.displayName;
       return name ? kebabCase(name) : '';
     };
-    /** @type {WeakMap<Object, Node>} */
-    const markElement = function (node, vm) {
-      console.log('[YAWF DEBUG] markElement called, node:', node?.tagName, 'vm:', !!vm);
-      if (!vm || getVmEl(vm) !== node || !isMountedVm(vm)) {
-        console.log('[YAWF DEBUG] markElement early return - vm:', !!vm, 'elMatch:', getVmEl(vm) === node, 'mounted:', isMountedVm(vm));
-        return;
-      }
-      const tag = getTag(vm);
-      console.log('[YAWF DEBUG] markElement tag:', tag);
-      if (tag && node instanceof Element) {
+	    /** @type {WeakMap<Object, Node>} */
+	    const markElement = function (node, vm) {
+	      if (!vm || getVmEl(vm) !== node || !isMountedVm(vm)) {
+	        return;
+	      }
+	      const tag = getTag(vm);
+	      if (tag && node instanceof Element) {
         if (node.hasAttribute('yawf-component-tag')) {
           const tags = [...new Set([...node.getAttribute('yawf-component-tag').split(' '), tag]).values()].join(' ');
           node.setAttribute('yawf-component-tag', tags);
@@ -3403,33 +3438,30 @@ html { background: #f9f9fa; }
       // 所以我们使用 MutationObserver 监听 data-v-app 属性
       if (node.nodeType !== Node.ELEMENT_NODE) return;
 
-      // 检查是否已经有 Vue 3 app
-      if (node.__vue_app__) {
-        console.log('[YAWF DEBUG] Found existing __vue_app__ on node:', node.tagName);
-        setTimeout(() => traverseVue3App(node.__vue_app__), 0);
-      }
+	      // 检查是否已经有 Vue 3 app
+	      if (node.__vue_app__) {
+	        setTimeout(() => traverseVue3App(node.__vue_app__), 0);
+	      }
 
       // 监听 data-v-app 属性的添加（Vue 3 挂载标志）
       if (node.id === 'app' || node.hasAttribute('data-v-app')) {
         const attrObserver = new MutationObserver((mutations) => {
-          for (const mutation of mutations) {
-            if (mutation.type === 'attributes' && mutation.attributeName === 'data-v-app') {
-              console.log('[YAWF DEBUG] data-v-app attribute added to:', node.tagName);
-              if (node.__vue_app__) {
-                setTimeout(() => traverseVue3App(node.__vue_app__), 0);
-              }
+	          for (const mutation of mutations) {
+	            if (mutation.type === 'attributes' && mutation.attributeName === 'data-v-app') {
+	              if (node.__vue_app__) {
+	                setTimeout(() => traverseVue3App(node.__vue_app__), 0);
+	              }
               attrObserver.disconnect();
             }
           }
         });
         attrObserver.observe(node, { attributes: true, attributeFilter: ['data-v-app'] });
 
-        // 如果已经有 data-v-app 属性，立即处理
-        if (node.hasAttribute('data-v-app') && node.__vue_app__) {
-          console.log('[YAWF DEBUG] Node already has data-v-app:', node.tagName);
-          setTimeout(() => traverseVue3App(node.__vue_app__), 0);
-          attrObserver.disconnect();
-        }
+	        // 如果已经有 data-v-app 属性，立即处理
+	        if (node.hasAttribute('data-v-app') && node.__vue_app__) {
+	          setTimeout(() => traverseVue3App(node.__vue_app__), 0);
+	          attrObserver.disconnect();
+	        }
       }
 
       // 同时保留原来的 __vueParentComponent 监听
@@ -3451,35 +3483,27 @@ html { background: #f9f9fa; }
         });
       } catch (e) { /* ignore */ }
     };
-    // 遍历 Vue 3 应用的组件树
-    const traverseVue3App = function (app) {
-      console.log('[YAWF DEBUG] traverseVue3App called');
-      const vnode = app._container?._vnode;
-      const rootComponent = vnode?.component;
-      console.log('[YAWF DEBUG] rootComponent exists:', !!rootComponent);
-      if (!rootComponent) return;
-      // 报告根节点
-      const rootEl = rootComponent.vnode?.el || rootComponent.subTree?.el;
-      console.log('[YAWF DEBUG] rootEl:', rootEl, 'parent:', rootComponent.parent);
-      if (rootEl && rootComponent.parent == null) {
-        console.log('[YAWF DEBUG] Calling reportRootNode');
-        reportRootNode(rootEl, rootComponent.proxy || rootComponent);
-        listenRouteChange(rootEl, rootComponent.proxy || rootComponent);
-      } else {
-        console.log('[YAWF DEBUG] NOT calling reportRootNode - rootEl:', !!rootEl, 'parent==null:', rootComponent.parent == null);
-      }
+	    // 遍历 Vue 3 应用的组件树
+	    const traverseVue3App = function (app) {
+	      const vnode = app._container?._vnode;
+	      const rootComponent = vnode?.component;
+	      if (!rootComponent) return;
+	      // 报告根节点
+	      const rootEl = rootComponent.vnode?.el || rootComponent.subTree?.el;
+	      if (rootEl && rootComponent.parent == null) {
+	        reportRootNode(rootEl, rootComponent.proxy || rootComponent);
+	        listenRouteChange(rootEl, rootComponent.proxy || rootComponent);
+	      }
       // 遍历所有组件
       traverseVue3Component(rootComponent);
     };
     const traverseVue3Component = function (comp, depth = 0) {
       if (!comp || depth > 50) return;
       // 处理当前组件
-      const el = comp.vnode?.el || comp.subTree?.el;
-      const type = comp.type;
-      const name = type?.name || type?.__name || type?.displayName || 'anonymous';
-      if (depth <= 15) {
-        console.log('[YAWF DEBUG] traverseVue3Component depth:', depth, 'name:', name, 'el:', el?.tagName, 'isMounted:', comp.isMounted);
-      }
+	      const el = comp.vnode?.el || comp.subTree?.el;
+	      const type = comp.type;
+	      const name = type?.name || type?.__name || type?.displayName || 'anonymous';
+	      void name;
       if (el && comp.isMounted) {
         markElement(el, comp.proxy || comp);
       }
@@ -3508,19 +3532,16 @@ html { background: #f9f9fa; }
     let nodeCount = 0;
     /** @param {Node} node */
     const eachMountedNode = function (node) {
-      if (seenElement.has(node)) return;
-      seenElement.add(node);
-      nodeCount++;
-      if (nodeCount <= 10 || nodeCount % 100 === 0) {
-        console.log('[YAWF DEBUG] eachMountedNode #' + nodeCount + ', node:', node.tagName || node.nodeName);
-      }
-      if (node.nodeType === Node.ELEMENT_NODE) {
-        // Vue 2 检测
-        if (node.__vue__) {
-          console.log('[YAWF DEBUG] Found Vue 2 node:', node.tagName);
-          for (let vm of eachVmForNode(node)) {
-            if (isVue2Vm(vm)) {
-              if (vm.$parent == null) {
+	      if (seenElement.has(node)) return;
+	      seenElement.add(node);
+	      nodeCount++;
+	      void nodeCount;
+	      if (node.nodeType === Node.ELEMENT_NODE) {
+	        // Vue 2 检测
+	        if (node.__vue__) {
+	          for (let vm of eachVmForNode(node)) {
+	            if (isVue2Vm(vm)) {
+	              if (vm.$parent == null) {
                 reportRootNode(node, vm);
                 listenRouteChange(node, vm);
               }
@@ -3528,11 +3549,10 @@ html { background: #f9f9fa; }
             }
           }
         }
-        // Vue 3 检测 - 通过 __vue_app__ 遍历组件树
-        if (node.__vue_app__) {
-          console.log('[YAWF DEBUG] Found Vue 3 app node:', node.tagName);
-          traverseVue3App(node.__vue_app__);
-        }
+	        // Vue 3 检测 - 通过 __vue_app__ 遍历组件树
+	        if (node.__vue_app__) {
+	          traverseVue3App(node.__vue_app__);
+	        }
         watchVueAttr(node);
         watchVue3Attr(node);
       }
@@ -3562,10 +3582,10 @@ html { background: #f9f9fa; }
       });
     }
 
-    Object.defineProperty(window, rootKey, { value: {}, enumerable: false, writable: false });
-    const yawf = window[rootKey];
-    const vueSetup = yawf.vueSetup = yawf.vueSetup ?? {};
-    console.log('[YAWF DEBUG] vueSetup initialized, rootKey:', rootKey);
+	    Object.defineProperty(window, rootKey, { value: {}, enumerable: false, writable: false });
+	    const yawf = window[rootKey];
+	    const vueSetup = yawf.vueSetup = yawf.vueSetup ?? {};
+	    debugLog('vueSetup initialized, rootKey:', rootKey);
 
     vueSetup.getRootVm = () => rootVm;
 
@@ -6663,11 +6683,10 @@ article[class*="Feed"].yawf-feed-filter-running::before { content: " "; display:
       more: {
         bot: yawf.rules.comment.more.commentByBot.getConfig(),
       }
-    };
-    util.inject(function (rootKey, configs) {
-      console.log(configs);
-      const yawf = window[rootKey];
-      const vueSetup = yawf.vueSetup;
+	    };
+	    util.inject(function (rootKey, configs) {
+	      const yawf = window[rootKey];
+	      const vueSetup = yawf.vueSetup;
       const matchText = (comment, textList) => (
         textList.some(text => comment.text_raw.includes(text))
       );
@@ -6695,10 +6714,9 @@ article[class*="Feed"].yawf-feed-filter-running::before { content: " "; display:
             matchUser(comment, configs.user.hide) ||
             configs.more.bot && matchBot(comment) ||
             false);
-          if (isHide) {
-            console.log('Comment %o hidden', comment.idstr);
-            return 'hide';
-          }
+	          if (isHide) {
+	            return 'hide';
+	          }
           return null;
         } catch (error) {
           console.error('Error while filte comment: %o', error);
@@ -11922,29 +11940,55 @@ article[class*="Feed"].yawf-feed-filter-running::before { content: " "; display:
   }, function (options) {
     const hideSymbol = Object.keys(options).filter(key => options[key]).join(',').split(',');
 
-    util.inject(function (rootKey, hideSymbol) {
-      const yawf = window[rootKey];
-      const vueSetup = yawf.vueSetup;
+	    util.inject(function (rootKey, hideSymbol) {
+	      const yawf = window[rootKey];
+	      const vueSetup = yawf.vueSetup;
 
-      const wooIcon = vueSetup.getRootVm().$options._base.component('woo-icon');
-      wooIcon.options.render = (function (render) {
-        return function (h) {
-          if (hideSymbol.includes(this.symbol)) {
-            return h('span', { ref: 'frames', style: 'display: none;' });
-          }
-          return render.call(this, h);
-        };
-      }(wooIcon.options.render));
+	      const root = vueSetup.getRootVm();
+	      let wooIcon = null;
+	      try {
+	        // Vue 2
+	        if (root?.$options?._base && typeof root.$options._base.component === 'function') {
+	          wooIcon = root.$options._base.component('woo-icon');
+	        } else {
+	          // Vue 3
+	          const internal = root?.$?.appContext ? root.$ : (root?.appContext ? root : null);
+	          const components = internal?.appContext?.components || null;
+	          wooIcon = components?.['woo-icon'] || components?.WooIcon || null;
+	        }
+	      } catch (e) { /* ignore */ }
 
-      vueSetup.eachComponentVM('woo-icon', vm => { vm.$forceUpdate(); }, { watch: false });
-      vueSetup.eachComponentVM('icon', vm => {
-        if (Object.getPrototypeOf(vm) === wooIcon.prototype) vm.$forceUpdate();
-      }, { watch: false });
+	      try {
+	        if (wooIcon) {
+	          const opt = wooIcon.options || wooIcon;
+	          const render = opt?.render;
+	          if (typeof render === 'function' && !render.__yawf_hide_symbol__) {
+	            const wrapped = function (...args) {
+	              try {
+	                if (hideSymbol.includes(this?.symbol)) {
+	                  // Vue 2: return a hidden vnode; Vue 3: returning null renders nothing
+	                  if (args.length && typeof args[0] === 'function') return args[0]('span', { ref: 'frames', style: 'display: none;' });
+	                  return null;
+	                }
+	              } catch (e) { /* ignore */ }
+	              return render.apply(this, args);
+	            };
+	            wrapped.__yawf_hide_symbol__ = true;
+	            wrapped.originalRender = render;
+	            opt.render = wrapped;
+	          }
+	        }
+	      } catch (e) { /* ignore */ }
 
-      const hideVip = hideSymbol.includes('vip');
-      const hideBigfan = hideSymbol.includes('bigfan');
-      if (hideVip || hideBigfan) {
-        vueSetup.eachComponentVM('icon-fans', function (vm) {
+	      vueSetup.eachComponentVM('woo-icon', vm => { if (vm?.$forceUpdate) vm.$forceUpdate(); }, { watch: false });
+	      vueSetup.eachComponentVM('icon', vm => {
+	        if (wooIcon?.prototype && Object.getPrototypeOf(vm) === wooIcon.prototype) vm.$forceUpdate();
+	      }, { watch: false });
+
+	      const hideVip = hideSymbol.includes('vip');
+	      const hideBigfan = hideSymbol.includes('bigfan');
+	      if (hideVip || hideBigfan) {
+	        vueSetup.eachComponentVM('icon-fans', function (vm) {
           if (hideVip) {
             Object.defineProperties(vm, { isVip: { get: () => false } });
           }
@@ -19279,20 +19323,20 @@ body[yawf-feed-only] .WB_frame { padding-left: 0; }
     en: 'Show recognized texts for regex rules of each feeds in console',
   };
 
-  debug.regex = rule.Rule({
-    id: 'script_debug_regex',
-    version: 1,
-    parent: debug.debug,
-    template: () => i18n.debugRegex,
-    ainit: function () {
-      observer.feed.filter(function regexDebugger(feed) {
-        const text = feedParser.text.detail(feed);
-        const json = JSON.stringify(text).replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
-        console.log('%o\n%o', feed, json);
-        return null;
-      }, { priority: 1e7 });
-    },
-  });
+	  debug.regex = rule.Rule({
+	    id: 'script_debug_regex',
+	    version: 1,
+	    parent: debug.debug,
+	    template: () => i18n.debugRegex,
+	    ainit: function () {
+	      observer.feed.filter(function regexDebugger(feed) {
+	        const text = feedParser.text.detail(feed);
+	        const json = JSON.stringify(text).replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
+	        util.debug('%o\n%o', feed, json);
+	        return null;
+	      }, { priority: 1e7 });
+	    },
+	  });
 
 }());
 //#endregion
