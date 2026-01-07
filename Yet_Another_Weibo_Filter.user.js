@@ -8649,20 +8649,39 @@ article[class*="Feed"].yawf-feed-filter-running::before { content: " "; display:
 
       const root = vueSetup.getRootVm();
       const router = root.$router;
-      router.beforeEach((to, from, next) => {
-        if (to.name === 'home') {
-          next('/mygroups?gid=' + gid);
-        } else {
-          next();
+      const targetPath = '/mygroups?gid=' + gid;
+      const getRoute = routeRef => routeRef && routeRef.value ? routeRef.value : routeRef;
+      const isHomeRoute = route => {
+        if (!route) return false;
+        if (route.name === 'home') return true;
+        const path = typeof route.path === 'string' ? route.path : '';
+        const fullPath = typeof route.fullPath === 'string' ? route.fullPath : '';
+        const key = path || fullPath;
+        return key === '/' || key === '/home' || key.startsWith('/home?') || key.startsWith('/home/');
+      };
+
+      if (typeof router.__yawf_fix_home_guard__ === 'function') {
+        router.__yawf_fix_home_guard__();
+      }
+      router.__yawf_fix_home_guard__ = router.beforeEach((to, from, next) => {
+        if (isHomeRoute(to)) {
+          if (typeof next === 'function') return next(targetPath);
+          return targetPath; // vue-router v4
         }
+        if (typeof next === 'function') next();
+        return undefined;
       });
-      if (router.currentRoute.name === 'home') {
-        router.replace('/mygroups?gid=' + gid);
+
+      const currentRoute = getRoute(router.currentRoute);
+      if (isHomeRoute(currentRoute)) {
+        const r = router.replace(targetPath);
+        if (r && typeof r.catch === 'function') r.catch(() => { /* ignore */ });
       }
 
       const bus = root.$Bus;
       bus.$on('handleHomeNav', function (data) {
-        if (data.gid.startsWith('10001')) {
+        const dataGid = String(data && data.gid != null ? data.gid : '');
+        if (dataGid.startsWith('10001')) {
           bus.$emit('handleHomeNav', { gid, title: name, api, yawf_Trigger: true }, index, source);
         } else if (data.yawf_Trigger) {
           vueSetup.eachComponentVM('home', function (vm) {
