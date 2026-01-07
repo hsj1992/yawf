@@ -12041,6 +12041,7 @@ article[class*="Feed"].yawf-feed-filter-running::before { content: " "; display:
   const yawf = window.yawf;
   const env = yawf.env;
   const util = yawf.util;
+  const observer = yawf.observer;
   const backend = yawf.backend;
 
   const clean = yawf.rules.clean;
@@ -12742,6 +12743,10 @@ body .WB_handle ul li { flex: 1 1 auto; float: none; width: auto; }
   clean.CleanGroup('other', () => i18n.cleanOtherGroupTitle);
   clean.CleanRule('ads', () => i18n.cleanOtherAds, 1, {
     v7Support: true,
+    acss: `
+.woo-box-flex:has(img[src*="kadmimage.biz.weibo.com/"]),
+.woo-picture-main:has(img[src*="kadmimage.biz.weibo.com/"]) { display: none !important; }
+`,
     ainit: function () {
       util.inject(function (rootKey) {
         const yawf = window[rootKey];
@@ -12774,6 +12779,24 @@ body .WB_handle ul li { flex: 1 1 auto; float: none; width: auto; }
           return function () { return null; };
         }, { raw: true });
       }, util.inject.rootKey);
+
+      // Fallback: some ad blocks are pure DOM (CSS-module classnames) and won't be removed by Vue data filtering.
+      observer.dom.add(function hideKadmAds() {
+        const images = Array.from(document.querySelectorAll('img[src*="kadmimage.biz.weibo.com/"]'));
+        images.forEach(img => {
+          const box = img.closest('.woo-box-flex');
+          if (box) {
+            const hasClose = !!box.querySelector('img[src*="/close.png"], img[src$="close.png"]');
+            const hasPicture = !!box.querySelector('.woo-picture-main, .woo-picture-hoverMask');
+            if (hasClose && hasPicture) {
+              box.style.setProperty('display', 'none', 'important');
+              return;
+            }
+          }
+          const picture = img.closest('.woo-picture-main');
+          if (picture) picture.style.setProperty('display', 'none', 'important');
+        });
+      });
     },
   });
   if (env.config.requestBlockingSupported) {
@@ -12790,7 +12813,11 @@ body .WB_handle ul li { flex: 1 1 auto; float: none; width: auto; }
   clean.CleanRule('template', () => i18n.cleanOtherTemplate, 1, '.icon_setskin { display: none !important; }');
   clean.CleanRule('home_tip', () => i18n.cleanOtherHomeTip, 1, '#v6_pl_content_hometip { display: none !important }');
   clean.CleanRule('footer', () => i18n.cleanOtherFooter, 1, {
-    acss: '[yawf-component-tag*="copy-right"] { display: none !important; }',
+    acss: `
+[yawf-component-tag*="copy-right"],
+.wbpro-side-copy-inner,
+[class*="wbpro-side-copy"] { display: none !important; }
+`,
     ref: { i: { type: 'bubble', icon: 'warn', template: () => i18n.cleanOtherFooterDetail } },
     v7Support: true,
   });
