@@ -6482,7 +6482,10 @@ article[class*="Feed"].yawf-feed-filter-running::before { content: " "; display:
       const applyFilterResult = function (vm, feed, { result, reason }) {
         if (result === 'hide') {
           const index = vm.data.indexOf(feed);
-          vm.data.splice(index, 1);
+          // V7: Guard against splice(-1, 1) which would delete the last item
+          if (index >= 0) {
+            vm.data.splice(index, 1);
+          }
         }
       };
       vueSetup.eachComponentVM('feed', function (vm) {
@@ -6638,26 +6641,30 @@ article[class*="Feed"].yawf-feed-filter-running::before { content: " "; display:
       let runIndex = 0;
       const seenFeeds = new WeakMap();
       const onBeforeUpdate = function () {
+        // V7: feed-scroll's `data` can contain non-status "cards" mixed into the list
+        // (e.g. friend recommendations / hot topics). Allow processing these items
+        // so that filter_fake_weibo can handle them at high priority.
         const vm = this;
         if (!Array.isArray(vm.data)) return;
-        vm.data.forEach(async feed => {
-          if (seenFeeds.has(feed)) return;
-          if (!(feed.mid > 0)) return;
+        vm.data.forEach(async item => {
+          if (!item || typeof item !== 'object') return;
+          if (seenFeeds.has(item)) return;
+          // Removed: if (!(feed.mid > 0)) return; - now allow non-status items
           try {
             const id = runIndex++;
-            vm.$set(feed, '_yawf_FilterStatus', 'loading');
-            vm.$set(feed, '_yawf_FilterReason', null);
-            vm.$set(feed, '_yawf_FilterApply', true);
-            vm.$set(feed, '_yawf_FilterRunIndex', id);
-            seenFeeds.set(feed, id);
-            await longContentExpand(vm, feed);
-            const { result, reason } = await triggerFilter(vm, feed);
-            if (Array.isArray(vm.data) && vm.data.includes(feed)) {
-              applyFilterResult(vm, feed, { result, reason });
+            vm.$set(item, '_yawf_FilterStatus', 'loading');
+            vm.$set(item, '_yawf_FilterReason', null);
+            vm.$set(item, '_yawf_FilterApply', true);
+            vm.$set(item, '_yawf_FilterRunIndex', id);
+            seenFeeds.set(item, id);
+            await longContentExpand(vm, item);
+            const { result, reason } = await triggerFilter(vm, item);
+            if (Array.isArray(vm.data) && vm.data.includes(item)) {
+              applyFilterResult(vm, item, { result, reason });
             }
           } catch (e) {
-            util.debug('Error while filter feed %o', feed);
-            applyFilterResult(vm, feed, {});
+            util.debug('Error while filter feed %o', item);
+            applyFilterResult(vm, item, {});
           }
         });
       };
@@ -7520,14 +7527,23 @@ article[class*="Feed"].yawf-feed-filter-running::before { content: " "; display:
   feedParser.mid = feed => mid(feed.mid);
   feedParser.omid = feed => mid(feed.retweeted_status?.mid);
 
+  // V7: Helper to distinguish real status items from non-status "cards" (recommendations, hot topics)
+  // A real status always has a valid mid (> 0). Non-status items mixed into feed list have no mid.
+  // Defensive: handle null/undefined/non-object inputs safely
+  feedParser.isStatus = feed => {
+    if (!feed || typeof feed !== 'object') return false;
+    return feedParser.mid(feed) != null;
+  };
+
   feedParser.isFast = feed => feed.screen_name_suffix_new != null;
   feedParser.isFastForward = feed => feedParser.isFast(feed) && feed.ori_mid != null;
   feedParser.isForward = feed => feed.retweeted_status != null;
 
   const author = feedParser.author = {};
   author.avatar = catched(feed => feed.user.avatar_large || feed.user.avatar_hd, null);
-  author.id = feed => [feed.user.idstr];
-  author.name = feed => [feed.user.screen_name];
+  // V7: Wrap with catched to safely handle non-status items (no user object)
+  author.id = catched(feed => [feed.user.idstr], []);
+  author.name = catched(feed => [feed.user.screen_name], []);
   const fauthor = feedParser.fauthor = {};
   fauthor.id = feed => feedParser.isFastForward(feed) ? [String(feed.ori_uid)] : []; // ori_mid 是被快转微博 id，ori_uid 是转快转的人的 id
   fauthor.name = catched(feed => feedParser.isFastForward(feed) ? [feed.screen_name_suffix_new.find(x => x.type === 2).content] : [], []);
@@ -10599,6 +10615,7 @@ header[content_auth="5"] ~ * { display: none !important; }
   // 所以这条规则被设置为最高的优先级，而且如果关闭了这个设置项，就直接让这些东西显示出来
   commercial.fakeWeibo = rule.Rule({
     id: 'filter_fake_weibo',
+    v7Support: true,
     version: 1,
     parent: commercial.commercial,
     template: () => i18n.fakeWeiboFilter,
@@ -10606,12 +10623,35 @@ header[content_auth="5"] ~ * { display: none !important; }
       i: { type: 'bubble', icon: 'ask', template: () => i18n.fakeWeiboFilterDetail },
     },
     init() {
-      // const rule = this;
+      const rule = this;
       observer.feed.filter(function fakeWeiboFilter(feed) {
+        // V7: Primary detection - non-status items (no valid mid)
+        // These are "cards" mixed into feed list: friend recommendations, hot topics, etc.
+        if (!feedParser.isStatus(feed)) {
+          // When rule is disabled, return 'unset' to prevent other rules from processing
+          // non-status items (which may cause errors as they lack standard feed fields)
+          if (!rule.isEnabled()) return 'unset';
+          if (init.page.type() !== 'search') return 'hide';
+          return 'unset';
+        }
+
+        // For real status items, only apply secondary checks if rule is enabled
+        if (!rule.isEnabled()) return null;
+
+        // V7: Secondary detection - check title field as fallback
+        // Some items may have mid but still be recommendations/promotions
+        if (feed.title?.text && typeof feed.title.text === 'string') {
+          const titleText = feed.title.text;
+          if (titleText.includes('好友推荐') || titleText.includes('热门话题')) {
+            return 'hide';
+          }
+        }
+        if (feed.title?.type === 'recommend' || feed.title?.type === 'hot_topic') {
+          return 'hide';
+        }
+
         return null;
-        // if (rule.isEnabled() && init.page.type() !== 'search') return 'hide';
-        // return 'unset';
-      }, { priority: 1e6 });
+      }, { priority: 1e6 + 10 });
       this.addConfigListener(() => { observer.feed.rerun(); });
     },
   });
