@@ -6530,6 +6530,9 @@ article[class*="Feed"].yawf-feed-filter-running::before { content: " "; display:
             if (this.data._yawf_FilterReason) {
               vnode.data.attrs['data-yawf-filter-reason'] = this.data._yawf_FilterReason;
             }
+            if (this.data._yawf_FeedPreload) {
+              vnode.data.attrs['yawf-feed-preload'] = this.data._yawf_FeedPreload;
+            }
           }
           return vnode;
         });
@@ -6582,29 +6585,81 @@ article[class*="Feed"].yawf-feed-filter-running::before { content: " "; display:
           });
 	        });
 	        vm.$scopedSlots.content = (function (content) {
-	          return function (data) {
-	            if (!data?.item) return content.call(this, data);
-	            const createElement = vm._self._c, h = createElement;
-	            const raw = content.call(this, data);
-	            // 给每个元素一个唯一的标识用于对应高度检测器
-	            // 我们没办法用现成的 mid 或 comment_id，因为我们并不知道元素是什么类型
-	            // 元素有可能是 feed，但也有可能是其他任何东西
-            if (!data.item._yawf_HeightIndex) {
-              data.item._yawf_HeightIndex = ++heightIndex;
-            }
+		          return function (data) {
+		            if (!data?.item) return content.call(this, data);
+		            const createElement = vm._self._c, h = createElement;
+		            const raw = content.call(this, data);
+		            const setAttr = function (vnode, name, value) {
+		              if (!vnode || typeof vnode !== 'object') return;
+		              if (vnode.data) {
+		                vnode.data.attrs = vnode.data.attrs || {};
+		                vnode.data.attrs[name] = value;
+		              } else if (vnode.props && typeof vnode.props === 'object') {
+		                vnode.props[name] = value;
+		              }
+		            };
+		            const addClass = function (vnode, name) {
+		              if (!vnode || typeof vnode !== 'object') return;
+		              if (vnode.data) {
+		                const current = vnode.data.class;
+		                if (typeof current === 'string') vnode.data.class = current ? current + ' ' + name : name;
+		                else if (Array.isArray(current)) vnode.data.class = current.concat([name]);
+		                else if (current && typeof current === 'object') vnode.data.class = Object.assign({}, current, { [name]: true });
+		                else vnode.data.class = name;
+		              } else if (vnode.props && typeof vnode.props === 'object') {
+		                const current = vnode.props.class;
+		                if (typeof current === 'string') vnode.props.class = current ? current + ' ' + name : name;
+		                else if (Array.isArray(current)) vnode.props.class = current.concat([name]);
+		                else if (current && typeof current === 'object') vnode.props.class = Object.assign({}, current, { [name]: true });
+		                else vnode.props.class = name;
+		              }
+		            };
+		            const tagVnode = function (vnode) {
+		              if (!vnode || typeof vnode !== 'object') return;
+		              const item = data.item;
+		              if (item && typeof item === 'object') {
+		                if (item._yawf_FeedPreload) {
+		                  setAttr(vnode, 'yawf-feed-preload', item._yawf_FeedPreload);
+		                  if (item._yawf_FeedPreload === 'unread') addClass(vnode, 'yawf-feed-preload-unread');
+		                }
+		                if (item.mid) {
+		                  setAttr(vnode, 'data-feed-mid', item.mid);
+		                  if (item.user?.screen_name) setAttr(vnode, 'data-feed-author-name', item.user.screen_name);
+		                  if (item.retweeted_status?.mid) setAttr(vnode, 'data-feed-omid', item.retweeted_status.mid);
+		                }
+		              }
+		            };
+		            const walk = function (node) {
+		              if (!node) return;
+		              if (Array.isArray(node)) {
+		                node.forEach(walk);
+		                return;
+		              }
+		              if (typeof node === 'object') {
+		                tagVnode(node);
+		                if (Array.isArray(node.children)) walk(node.children);
+		              }
+		            };
+		            // 给每个元素一个唯一的标识用于对应高度检测器
+		            // 我们没办法用现成的 mid 或 comment_id，因为我们并不知道元素是什么类型
+		            // 元素有可能是 feed，但也有可能是其他任何东西
+	            if (!data.item._yawf_HeightIndex) {
+	              data.item._yawf_HeightIndex = ++heightIndex;
+	            }
             const index = data.item._yawf_HeightIndex;
-            const resizeSensor = h('div', {
-              class: 'yawf-resize-sensor',
-              ref: sensorPrefix + index,
-              key: sensorPrefix + index,
-              attrs: { id: sensorPrefix + index },
-            });
-            const result = Array.isArray(raw) ? raw : [raw];
-            result.push(resizeSensor);
-            updateSensor();
-            return result;
-          };
-        }(vm.$scopedSlots.content));
+	            const resizeSensor = h('div', {
+	              class: 'yawf-resize-sensor',
+	              ref: sensorPrefix + index,
+	              key: sensorPrefix + index,
+	              attrs: { id: sensorPrefix + index },
+	            });
+	            const result = Array.isArray(raw) ? raw : [raw];
+	            walk(result);
+	            result.push(resizeSensor);
+	            updateSensor();
+	            return result;
+	          };
+	        }(vm.$scopedSlots.content));
         vm.$watch(function () { return this.data; }, function () {
           if (!Array.isArray(vm.data)) return;
           vm.data.forEach(item => {
@@ -8834,16 +8889,46 @@ article[class*="Feed"].yawf-feed-filter-running::before { content: " "; display:
   });
 
   const showUnreadFeeds = function () {
-    let newfeedtip = document.getElementById('yawf-new-feed-tip');
-    if (!newfeedtip) return;
-    newfeedtip.remove();
-    const unreadFeeds = Array.from(document.querySelectorAll('[yawf-feed-preload="unread"]'));
-    unreadFeeds.forEach(feed => {
-      feed.setAttribute('yawf-feed-preload', 'show');
-    });
+    const isV7Home = !!document.querySelector('#homeWrap');
+    if (isV7Home) {
+      const tip = document.getElementById('yawf-new-feed-tip');
+      if (tip) tip.remove();
+      util.inject(function (rootKey) {
+        const yawf = window[rootKey];
+        const vueSetup = yawf.vueSetup;
+        vueSetup.eachComponentVM('feed-scroll', function (vm) {
+          if (!vm) return;
+          if (typeof vm.__yawf_autoLoadShowUnread === 'function') {
+            vm.__yawf_autoLoadShowUnread();
+            return;
+          }
+          // Fallback: if unread items are still in the list, just flip the flag to show.
+          if (!Array.isArray(vm.data)) return;
+          vm.data.forEach(item => {
+            if (!item || typeof item !== 'object') return;
+            if (item._yawf_FeedPreload !== 'unread') return;
+            try {
+              vm.$set(item, '_yawf_FeedPreload', 'show');
+            } catch (e) {
+              item._yawf_FeedPreload = 'show';
+            }
+          });
+        }, { watch: false });
+      }, util.inject.rootKey);
+      return;
+    } else {
+      let newfeedtip = document.getElementById('yawf-new-feed-tip');
+      if (!newfeedtip) return;
+      newfeedtip.remove();
+      const unreadFeeds = Array.from(document.querySelectorAll('[yawf-feed-preload="unread"]'));
+      unreadFeeds.forEach(feed => {
+        feed.setAttribute('yawf-feed-preload', 'show');
+      });
+    }
   };
 
   homepage.autoLoad = rule.Rule({
+    v7Support: true,
     id: 'filter_homepage_auto_load',
     version: 1,
     parent: homepage.homepage,
@@ -8852,6 +8937,300 @@ article[class*="Feed"].yawf-feed-filter-running::before { content: " "; display:
       i: { type: 'bubble', icon: 'ask', template: () => i18n.feedsAutoLoadDetail },
     },
     ainit() {
+      const isV7Home = !!document.querySelector('#homeWrap');
+      if (isV7Home) {
+        // V7: buffer new items and show a persistent tip (avoid relying on V6 DOM attrs).
+        css.append(`
+#yawf-new-feed-tip { position: fixed; left: 50%; transform: translateX(-50%); top: 56px; z-index: 2147483646; width: min(660px, calc(100vw - 24px)); }
+#yawf-new-feed-tip > a { display: block; padding: 10px 14px; background: rgba(255, 130, 0, .95); border: 1px solid rgba(0,0,0,.06); border-radius: 10px; text-align: center; color: #fff; font-weight: 600; box-shadow: 0 6px 22px rgba(0,0,0,.12); backdrop-filter: blur(6px); }
+#yawf-new-feed-tip > a:hover { background: rgba(255, 130, 0, 1); }
+`);
+
+        util.inject(function (rootKey, me, tipText, tipTextWithCount) {
+          const yawf = window[rootKey];
+          const vueSetup = yawf.vueSetup;
+
+          const formatTip = function (count) {
+            const withCount = String(tipTextWithCount || '');
+            const plain = String(tipText || '');
+            if (count > 0 && count < 100) return (withCount || plain).replace('{1}', count);
+            return plain;
+          };
+
+	          const ensureTip = function () {
+	            let tip = document.getElementById('yawf-new-feed-tip');
+	            if (tip) return tip;
+	            tip = document.createElement('div');
+	            tip.id = 'yawf-new-feed-tip';
+	            const link = document.createElement('a');
+	            link.href = 'javascript:void(0);';
+	            link.addEventListener('click', function () {
+	              vueSetup.eachComponentVM('feed-scroll', function (vm) {
+	                if (typeof vm?.__yawf_autoLoadShowUnread === 'function') vm.__yawf_autoLoadShowUnread();
+	              }, { mounted: true, watch: false });
+	              try {
+	                requestAnimationFrame(function () {
+	                  try { window.scrollTo({ top: 0, behavior: 'smooth' }); } catch (e) { /* ignore */ }
+	                  try { document.documentElement.scrollTop = 0; } catch (e) { /* ignore */ }
+	                  try { document.body.scrollTop = 0; } catch (e) { /* ignore */ }
+	                });
+	              } catch (e) { /* ignore */ }
+	            });
+	            tip.appendChild(link);
+	            // Insert into <body> to avoid being affected by transformed/scrolling ancestors.
+	            document.body.appendChild(tip);
+	            return tip;
+	          };
+
+	          const updateTip = function () {
+	            let total = 0;
+	            vueSetup.eachComponentVM('feed-scroll', function (vm) {
+	              const buffer = vm?.__yawf_autoLoadUnreadBuffer;
+	              if (!Array.isArray(buffer) || !buffer.length) return;
+
+	              // If the list was refreshed/replaced and buffered items already exist in the current list,
+	              // drop them from buffer to avoid duplicate insertion on "click to view".
+	              if (Array.isArray(vm?.data) && vm.data.length) {
+	                const existing = new Set();
+	                vm.data.forEach(item => {
+	                  if (!item || typeof item !== 'object') return;
+	                  if (item.mid > 0) existing.add(item.mid);
+	                });
+	                for (let i = buffer.length - 1; i >= 0; i--) {
+	                  const mid = buffer[i]?.mid;
+	                  if (mid > 0 && existing.has(mid)) buffer.splice(i, 1);
+	                }
+	              }
+
+	              total += buffer.length;
+	            }, { mounted: true, watch: false });
+
+            const tip = document.getElementById('yawf-new-feed-tip');
+            if (!total) {
+              if (tip) tip.remove();
+              return;
+            }
+
+            const t = ensureTip();
+            const link = t.querySelector('a');
+            if (link) link.textContent = formatTip(total);
+          };
+
+          const emitUnread = function (items) {
+            try {
+              if (!Array.isArray(items) || !items.length) return;
+              const payload = items.map(item => {
+                const mid = item?.mid ? String(item.mid) : '';
+                const author = item?.user?.screen_name || '';
+                const avatar = item?.user?.avatar_large || item?.user?.avatar_hd || item?.user?.profile_image_url || '';
+                const raw = item?.text_raw || item?.text || '';
+                const text = (raw + '').replace(/<[^>]+>/g, '').replace(/[\u200b\r\n]+/g, '\n').replace(/[ \t]+/g, ' ').trim();
+                return { mid, author, avatar, text };
+              }).filter(x => x.mid && x.author && x.text);
+              if (!payload.length) return;
+              document.dispatchEvent(new CustomEvent('yawf-v7-autoload-unread', { detail: payload }));
+            } catch (e) {
+              // ignore
+            }
+          };
+
+          if (!window.__yawf_v7_autoLoadKeyHooked) {
+            window.__yawf_v7_autoLoadKeyHooked = true;
+            document.addEventListener('keyup', function (event) {
+              const target = event.target;
+              if (target && (target.closest?.('input,textarea,[contenteditable=\"true\"]') || target.isContentEditable)) return;
+              if (event.key !== '.' && event.code !== 'Period') return;
+              vueSetup.eachComponentVM('feed-scroll', function (vm) {
+                if (typeof vm?.__yawf_autoLoadShowUnread === 'function') vm.__yawf_autoLoadShowUnread();
+              }, { mounted: true, watch: false });
+            }, true);
+          }
+
+          vueSetup.eachComponentVM('feed-scroll', function (vm) {
+            if (vm.__yawf_autoLoadHooked) return;
+            vm.__yawf_autoLoadHooked = true;
+
+            const seen = new Set();
+            let firstMid = null;
+            let inited = false;
+            const buffer = vm.__yawf_autoLoadUnreadBuffer = vm.__yawf_autoLoadUnreadBuffer || [];
+
+            const getFirstMid = function () {
+              if (!Array.isArray(vm.data)) return null;
+              const first = vm.data.find(item => item && typeof item === 'object' && item.mid > 0);
+              return first?.mid || null;
+            };
+
+	            const showUnread = function () {
+	              if (!Array.isArray(vm.data)) return;
+	              if (!Array.isArray(buffer) || !buffer.length) {
+	                updateTip();
+	                return;
+	              }
+	              const existing = new Set();
+	              vm.data.forEach(item => {
+	                if (!item || typeof item !== 'object') return;
+	                if (item.mid > 0) existing.add(item.mid);
+	              });
+
+	              const toInsert = buffer.filter(item => item && typeof item === 'object' && item.mid > 0 && !existing.has(item.mid));
+	              toInsert.forEach(item => {
+	                if (!item || typeof item !== 'object') return;
+	                try {
+	                  vm.$set(item, '_yawf_FeedPreload', 'show');
+	                } catch (e) {
+	                  item._yawf_FeedPreload = 'show';
+	                }
+	              });
+	              if (toInsert.length) vm.data.splice(0, 0, ...toInsert);
+	              buffer.length = 0;
+	              updateTip();
+	            };
+            vm.__yawf_autoLoadShowUnread = showUnread;
+
+            const onBeforeUpdate = function () {
+              if (!document.getElementById('homeWrap')) return;
+              if (!Array.isArray(vm.data)) return;
+
+              const currentFirstMid = getFirstMid();
+
+              if (!inited) {
+                vm.data.forEach(item => {
+                  if (!item || typeof item !== 'object' || !(item.mid > 0)) return;
+                  seen.add(item.mid);
+                  if (item._yawf_FeedPreload == null) vm.$set(item, '_yawf_FeedPreload', 'show');
+                });
+                firstMid = currentFirstMid;
+                inited = true;
+                updateTip();
+                return;
+              }
+
+              // Distinguish "new items inserted at top" from "older items appended at bottom":
+              // Prefer an overlap anchor: the first already-seen mid in current list.
+              // This survives list replacement (not only splice-insert behavior).
+              const oldFirstMid = firstMid;
+              const oldFirstIndex = oldFirstMid ? vm.data.findIndex(item => item?.mid === oldFirstMid) : -1;
+              let anchorIndex = vm.data.findIndex(item => item?.mid && seen.has(item.mid));
+              if (oldFirstIndex >= 0) {
+                if (anchorIndex < 0) anchorIndex = oldFirstIndex;
+                else anchorIndex = Math.min(anchorIndex, oldFirstIndex);
+              }
+              const markTopInserted = anchorIndex > 0;
+              const toBuffer = [];
+              const toRemove = [];
+
+              for (let i = 0; i < vm.data.length; i++) {
+                const item = vm.data[i];
+                if (!item || typeof item !== 'object' || !(item.mid > 0)) continue;
+                if (seen.has(item.mid)) continue;
+                seen.add(item.mid);
+
+                // Posts created by self are inserted at top; don't treat them as unread preload.
+                const authorId = item.user?.idstr || item.user?.id;
+                const isSelf = me && authorId && String(authorId) === String(me);
+
+                if (markTopInserted && i < anchorIndex && !isSelf) {
+                  vm.$set(item, '_yawf_FeedPreload', 'unread');
+                  toBuffer.push(item);
+                  toRemove.push(i);
+                } else {
+                  vm.$set(item, '_yawf_FeedPreload', 'show');
+                }
+              }
+
+              if (toBuffer.length) {
+                // Keep buffer as "newest first": prepend the incoming chunk.
+                buffer.unshift(...toBuffer);
+                // Remove buffered items from current list so they won't flash on screen.
+                for (let i = toRemove.length - 1; i >= 0; i--) {
+                  vm.data.splice(toRemove[i], 1);
+                }
+                emitUnread(toBuffer);
+                updateTip();
+              }
+
+              // If previous baseline disappeared (filtered out / list replaced), reset baseline to avoid hiding everything.
+              if (oldFirstMid && oldFirstIndex < 0) {
+                firstMid = currentFirstMid;
+              } else if (currentFirstMid) {
+                firstMid = currentFirstMid;
+              }
+            };
+
+            if (!vm.$options.beforeUpdate) {
+              vm.$options.beforeUpdate = [];
+            } else if (!Array.isArray(vm.$options.beforeUpdate)) {
+              vm.$options.beforeUpdate = [vm.$options.beforeUpdate];
+            }
+            if (!vm.$options.beforeUpdate.includes(onBeforeUpdate)) {
+              vm.$options.beforeUpdate.push(onBeforeUpdate);
+            }
+            onBeforeUpdate();
+
+            // V7 doesn't reliably show a "new weibo" banner; poll the timeline endpoint and buffer new items.
+            if (!vm.__yawf_autoLoadPollStarted) {
+              vm.__yawf_autoLoadPollStarted = true;
+              let polling = false;
+              const poll = async function () {
+                if (polling) return;
+                if (!document.getElementById('homeWrap')) return;
+                const gid = new URLSearchParams(location.search).get('gid');
+                if (!gid) return;
+                const since = getFirstMid();
+                if (!since) return;
+                polling = true;
+                try {
+                  const url = new URL('/ajax/feed/friendstimeline', location.origin);
+                  url.searchParams.set('list_id', gid);
+                  url.searchParams.set('fid', gid);
+                  url.searchParams.set('count', '25');
+                  url.searchParams.set('refresh', '1');
+                  url.searchParams.set('since_id', String(since));
+                  const resp = await fetch(url.toString(), { credentials: 'include' });
+                  if (!resp.ok) return;
+                  const json = await resp.json();
+                  const statuses = Array.isArray(json?.statuses) ? json.statuses : [];
+                  if (!statuses.length) return;
+                  const incoming = statuses.filter(s => s && s.mid && !seen.has(s.mid));
+                  if (!incoming.length) return;
+                  const toBuffer = [];
+                  incoming.forEach(s => {
+                    if (!s || !s.mid) return;
+                    seen.add(s.mid);
+                    try {
+                      const authorId = s.user?.idstr || s.user?.id;
+                      const isSelf = me && authorId && String(authorId) === String(me);
+                      if (isSelf) {
+                        s._yawf_FeedPreload = 'show';
+                      } else {
+                        s._yawf_FeedPreload = 'unread';
+                        toBuffer.push(s);
+                      }
+                    } catch (e) {
+                      s._yawf_FeedPreload = 'unread';
+                      toBuffer.push(s);
+                    }
+                  });
+                  if (toBuffer.length) {
+                    buffer.unshift(...toBuffer);
+                    emitUnread(toBuffer);
+                    updateTip();
+                  }
+                } catch (e) {
+                  // ignore polling errors
+                } finally {
+                  polling = false;
+                }
+              };
+              poll();
+              setInterval(poll, 60 * 1000);
+            }
+          });
+        }, util.inject.rootKey, init.page.config.user.idstr, i18n.feedsUnreadTip, i18n.feedsUnreadTipWithCount);
+
+	        return;
+	      }
 
       // 完成过滤后再提示有未读消息
       observer.feed.onFinally(function countUnreadFeeds() {
@@ -8936,19 +9315,75 @@ article[class*="Feed"].yawf-feed-filter-running::before { content: " "; display:
     },
   });
 
-  homepage.desktopNotify = rule.Rule({
-    id: 'filter_homepage_desktop_notify',
-    version: 1,
-    parent: homepage.homepage,
-    template: () => i18n.feedsDesktopNotify,
-    ref: { whitelist: { type: 'boolean' } },
-    ainit() {
-      const whitelist = this.ref.whitelist.getConfig();
+	  homepage.desktopNotify = rule.Rule({
+	    v7Support: true,
+	    id: 'filter_homepage_desktop_notify',
+	    version: 1,
+	    parent: homepage.homepage,
+	    template: () => i18n.feedsDesktopNotify,
+	    ref: { whitelist: { type: 'boolean' } },
+		    ainit() {
+		      const whitelist = this.ref.whitelist.getConfig();
+		      const isV7Home = !!document.querySelector('#homeWrap');
+		      if (isV7Home) {
+		        const notified = new Set();
+		        const onUnread = function (event) {
+		          try {
+		            if (!document.getElementById('homeWrap')) return;
+		            const items = Array.isArray(event.detail) ? event.detail : [];
+		            items.forEach(async item => {
+		              try {
+		                const mid = item && item.mid ? String(item.mid) : '';
+		                const author = item && item.author ? String(item.author) : '';
+		                const avatar = item && item.avatar ? String(item.avatar) : null;
+		                const text = item && item.text ? String(item.text) : '';
+		                if (!mid || !author || !text) return;
+		                if (notified.has(mid)) return;
+		                notified.add(mid);
 
-      // 完成过滤后再提示有未读消息
-      observer.feed.onFinally(function countUnreadFeeds() {
-        const unreadFeeds = Array.from(document.querySelectorAll('[yawf-feed-preload="unread"]:not([yawf-feed-notify])'));
-        unreadFeeds.forEach(async feed => {
+		                // Best-effort for whitelist: V7 unread buffering happens before DOM-based filter status is available.
+		                if (whitelist) {
+		                  // keep notifying by default (no reliable data-based "always show" signal here)
+		                }
+
+		                const truncked = text.length > 300 ? text.slice(0, 250) + '……' : text;
+		                const userResponse = await notifications.show({
+		                  title: author,
+		                  content: truncked,
+		                  icon: avatar,
+		                  duration: 5000 + 15 * truncked.length,
+		                });
+		                if (!userResponse) return;
+
+		                showUnreadFeeds();
+		                setTimeout(() => {
+		                  const header = document.getElementById(mid);
+		                  const target = header?.closest?.('article') || header;
+		                  if (!target) return;
+		                  target.scrollIntoView({ block: 'start' });
+		                  window.scrollBy(0, -80);
+		                  target.click?.();
+		                }, 0);
+		              } catch (e) {
+		                util.debug('Error while V7 desktop notify item: %o', e);
+		              }
+		            });
+		          } catch (e) {
+		            util.debug('Error while V7 desktop notify: %o', e);
+		          }
+		        };
+		        document.addEventListener('yawf-v7-autoload-unread', onUnread, true);
+		        init.onDeinit(() => {
+		          document.removeEventListener('yawf-v7-autoload-unread', onUnread, true);
+		        });
+
+		        return;
+		      }
+
+	      // 完成过滤后再提示有未读消息
+	      observer.feed.onFinally(function countUnreadFeeds() {
+	        const unreadFeeds = Array.from(document.querySelectorAll('[yawf-feed-preload="unread"]:not([yawf-feed-notify])'));
+	        unreadFeeds.forEach(async feed => {
           feed.setAttribute('yawf-feed-notify', '');
           if (whitelist && feed.getAttribute('yawf-feed-display') !== 'show') return;
           const text = feedParser.text.simple(feed);
@@ -9012,11 +9447,35 @@ article[class*="Feed"].yawf-feed-filter-running::before { content: " "; display:
   };
 
   profile.profileShowAll = rule.Rule({
+    v7Support: true,
     id: 'filter_profile_show_all',
     version: 1,
     parent: profile.profile,
     template: () => i18n.profileShowAll,
     ainit() {
+      observer.dom.add(function redirectPersonalWeiboTabV7() {
+        // V7 profile pages use a tab bar (DIV-based). Some accounts default to "精选" (featured/hot).
+        // This rule forces switching to the "微博" tab when we are on a profile page.
+        if (!document.querySelector('#app')) return;
+        if (!location.pathname.startsWith('/u/')) return;
+        const main = document.querySelector('main');
+        if (!main) return;
+        const nav = Array.from(main.querySelectorAll('.woo-tab-nav')).find(n => {
+          const text = (n.textContent || '').replace(/[\\s\\u200b]+/g, ' ').trim();
+          return text.includes('精选') && text.includes('微博');
+        });
+        if (!nav || nav.hasAttribute('yawf-notall')) return;
+        const active = nav.querySelector('.woo-tab-item-main.woo-tab-active');
+        const activeText = active ? (active.textContent || '').replace(/[\\s\\u200b]+/g, '').trim() : '';
+        if (!activeText || !/精选|热门/.test(activeText)) return;
+        const weibo = Array.from(nav.querySelectorAll('.woo-tab-item-main')).find(x => {
+          const t = (x.textContent || '').replace(/[\\s\\u200b]+/g, '').trim();
+          return t === '微博';
+        });
+        if (!weibo) return;
+        nav.setAttribute('yawf-notall', '');
+        weibo.click();
+      });
       observer.dom.add(function redirectPersionalWeiboRedirect() {
         const profileNav = document.querySelector('[id^="Pl_Official_ProfileFeedNav"]');
         if (!profileNav) return;
@@ -12115,7 +12574,12 @@ img[src*="vvip_"] { display: none !important; }
   clean.CleanRule('discover', () => i18n.cleanFollowDiscover, 1, '#plc_discover [node-type*="feed_recommend_follow"] { display: none !important; }');
   clean.CleanRule('fast_forward', () => i18n.cleanFollowFastForward, 1, '#v6_pl_content_homefeed [node-type*="feed_recommend_follow"] { display: none !important; }');
   clean.CleanRule('video', () => i18n.cleanFollowVideo, 1, '.WB_h5video .con-11, .wbv-add-box { display: none !important; }');
-  clean.CleanRule('recommend', () => i18n.cleanFollowRecommend, 1, '[action-type="follow_recommend_arr"], [node-type="follow_recommend_box"] { display: none !important; }');
+  clean.CleanRule('recommend', () => i18n.cleanFollowRecommend, 1, [
+    '[action-type="follow_recommend_arr"]',
+    '[node-type="follow_recommend_box"]',
+    // V7: profile follow recommendations sidebar module
+    '[page="profileRecom"]',
+  ].join(',') + ' { display: none !important; }', { v7Support: true });
 
 }());
 //#endregion
@@ -12376,7 +12840,48 @@ img[src*="vvip_"] { display: none !important; }
 
   clean.CleanGroup('middle', () => i18n.cleanMiddleGroupTitle);
   clean.CleanRule('recommended_topic', () => i18n.cleanMiddleRecommendedTopic, 1, '#v6_pl_content_publishertop div[node-type="recommendTopic"] { display: none !important; }');
-  clean.CleanRule('feed_recommend', () => i18n.cleanMiddleFeedRecommend, 1, 'a.notes[node-type="feed_list_newBar"][href^="http"]:not([action-type="feed_list_newBar"]), .WB_feed_newuser[node-type="recommfeed"] { display: none !important; }');
+  clean.CleanRule('feed_recommend', () => i18n.cleanMiddleFeedRecommend, 1, {
+    v7Support: true,
+    acss: 'a.notes[node-type="feed_list_newBar"][href^="http"]:not([action-type="feed_list_newBar"]), .WB_feed_newuser[node-type="recommfeed"] { display: none !important; }',
+    ainit() {
+      if (!document.getElementById('homeWrap')) return;
+      util.inject(function (rootKey) {
+        const yawf = window[rootKey];
+        const vueSetup = yawf && yawf.vueSetup;
+        if (!vueSetup) return;
+        const isRecom = function (item) {
+          if (!item || typeof item !== 'object') return false;
+          // V7: recommendation cards are often marked in feed JSON via `mark`/`title` etc.
+          // Be conservative: only match obvious recommend markers, and avoid ads (mark_ad).
+          const mark = typeof item.mark === 'string' ? item.mark : '';
+          if (mark && /mark_ad\\b/i.test(mark)) return false;
+          if (mark && /(mark_.*recom|recom(feed|user|topic)|interest)/i.test(mark)) return true;
+          const titleType = item.title && item.title.type ? String(item.title.type) : '';
+          if (titleType && /(recom|interest)/i.test(titleType)) return true;
+          const cardType = item.card_type != null ? String(item.card_type) : '';
+          if (cardType && /(recom|interest)/i.test(cardType)) return true;
+          return false;
+        };
+        const cleanVm = function (vm) {
+          if (!Array.isArray(vm.data)) return;
+          const original = vm.data;
+          const filtered = original.filter(item => !isRecom(item));
+          if (filtered.length === original.length) return;
+          vm.data.splice(0, vm.data.length, ...filtered);
+        };
+        vueSetup.eachComponentVM('feed-scroll', function (vm) {
+          if (!vm || vm.__yawf_cleanMiddleFeedRecomHooked) return;
+          vm.__yawf_cleanMiddleFeedRecomHooked = true;
+          // Clean now and on future updates.
+          cleanVm(vm);
+          if (!vm.$options.beforeUpdate) vm.$options.beforeUpdate = [];
+          else if (!Array.isArray(vm.$options.beforeUpdate)) vm.$options.beforeUpdate = [vm.$options.beforeUpdate];
+          const hook = function () { cleanVm(vm); };
+          if (!vm.$options.beforeUpdate.includes(hook)) vm.$options.beforeUpdate.push(hook);
+        });
+      }, util.inject.rootKey);
+    },
+  });
   clean.CleanRule('member_tip', () => i18n.cleanMiddleMemberTip, 1, '[node-type="feed_list_shieldKeyword"] { display: none !important; }');
 
 }());
@@ -12386,6 +12891,7 @@ img[src*="vvip_"] { display: none !important; }
 
   const yawf = window.yawf;
   const util = yawf.util;
+  const observer = yawf.observer;
 
   const i18n = util.i18n;
 
@@ -12450,6 +12956,32 @@ img[src*="vvip_"] { display: none !important; }
     cardInterested: interested,
     cardService: service,
   }, function (options) {
+    // V7 fallback: some right sidebar modules are not exposed as Vue component VMs,
+    // so also hide them by stable DOM titles under `#__sidebar`.
+    observer.dom.add(function hideV7RightSidebarCards() {
+      const sidebar = document.querySelector('#__sidebar');
+      if (!sidebar) return;
+      const panels = Array.from(sidebar.querySelectorAll('.wbpro-side, .woo-panel-main'));
+      if (!panels.length) return;
+      panels.forEach(panel => {
+        if (!(panel instanceof Element)) return;
+        if (panel.hasAttribute('yawf-right-hidden')) return;
+        const tit = panel.querySelector('.wbpro-side-tit');
+        const title = (tit ? tit.textContent : panel.textContent).replace(/[\u200b\r\n]+/g, ' ').replace(/[ \t]+/g, ' ').trim();
+        if (!title) return;
+
+        const shouldHide = (
+          (options.cardHotSearch && (title.includes('热搜') || title.includes('热门话题'))) ||
+          (options.cardInterested && title.includes('感兴趣的人')) ||
+          (options.cardService && title.includes('创作者中心'))
+        );
+
+        if (!shouldHide) return;
+        panel.setAttribute('yawf-right-hidden', '');
+        panel.style.setProperty('display', 'none', 'important');
+      });
+    });
+
     util.inject(function (rootKey, options) {
       const yawf = window[rootKey];
       const vueSetup = yawf.vueSetup;
@@ -12467,6 +12999,17 @@ img[src*="vvip_"] { display: none !important; }
           }
         }, { immediate: true });
       });
+
+      // Weibo may switch the hot search module implementation on resize/layout changes (e.g. DevTools open/close),
+      // so keep a render-level fallback to ensure the module stays hidden.
+      if (options.cardHotSearch) {
+        vueSetup.transformComponentsRenderByTagName('card-hot-search', function () {
+          return function () { return null; };
+        }, { raw: true });
+        vueSetup.transformComponentsRenderByTagName('new-hot', function () {
+          return function () { return null; };
+        }, { raw: true });
+      }
 
       if (options.hotSearchTop) {
         vueSetup.eachComponentVM('card-hot-search', function (vm) {
@@ -12727,7 +13270,28 @@ body .WB_handle ul li { flex: 1 1 auto; float: none; width: auto; }
   clean.CleanRule('album', () => i18n.cleanProfileAlbum, 1, '[id^="Pl_Core_RightPicMulti__"], .WB_frame_b [id^="Pl_Core_RightPicMulti__"], [yawf-obj-name="相冊"], [yawf-obj-name="相册"], [yawf-id="yawf-core-right-pic-multi"] { display: none !important; }');
   clean.CleanRule('hot_topic', () => i18n.cleanProfileHotTopic, 1, '[id^="Pl_Core_RightTextSingle__"], .WB_frame_b [id^="Pl_Core_RightTextSingle__"] { display: none !important; }');
   clean.CleanRule('hot_weibo', () => i18n.cleanProfileHotWeibo, 1, '[id^="Pl_Core_RightPicText__"], .WB_frame_b [id^="Pl_Core_RightPicText__"] { display: none !important; }');
-  clean.CleanRule('recommend_feed', () => i18n.cleanProfileRecommendFeed, 1, '.WB_frame_b [id^="Pl_Core_RecommendFeed__"] { display: none !important; }');
+  clean.CleanRule('recommend_feed', () => i18n.cleanProfileRecommendFeed, 1, {
+    v7Support: true,
+    acss: '.WB_frame_b [id^="Pl_Core_RecommendFeed__"] { display: none !important; }',
+    ainit() {
+      observer.dom.add(function hideV7ProfileRecommendFeed() {
+        if (!location.pathname.startsWith('/u/')) return;
+        const main = document.querySelector('main') || document.body;
+        const panels = Array.from(main.querySelectorAll('.wbpro-side, .woo-panel-main'));
+        panels.forEach(panel => {
+          if (!(panel instanceof Element)) return;
+          if (panel.hasAttribute('yawf-hide-profile-recommend-feed')) return;
+          const titleEl = panel.querySelector('.wbpro-side-tit, header, h2, h3, .woo-box-item-flex');
+          const title = titleEl ? titleEl.textContent.replace(/[\u200b\r\n]+/g, '').trim() : '';
+          if (!title) return;
+          if (title === '相关推荐') {
+            panel.setAttribute('yawf-hide-profile-recommend-feed', '');
+            panel.style.setProperty('display', 'none', 'important');
+          }
+        });
+      });
+    },
+  });
   clean.CleanRule('user_list', () => i18n.cleanProfileUserList, 1, '[id^="Pl_Core_Ut1UserList__"], .WB_frame_b [id^="Pl_Core_RightPicText__"] { display: none !important; }');
   clean.CleanRule('hongbao', () => i18n.cleanProfileHongbao, 1, '[yawf-id="yawf-pr-hongbao"], .WB_red2017 { display: none !important; }');
   clean.CleanRule('wenwo_dr', () => i18n.cleanProfileWenwoDr, 1, '[yawf-obj-name="爱问医生"] { display: none !important; }'); // 对应模块没有繁体或英文翻译
@@ -12837,9 +13401,9 @@ body .WB_handle ul li { flex: 1 1 auto; float: none; width: auto; }
   clean.CleanRule('ads', () => i18n.cleanOtherAds, 1, {
     v7Support: true,
     acss: `
-.woo-box-flex:has(img[src*="kadmimage.biz.weibo.com/"]),
-.woo-picture-main:has(img[src*="kadmimage.biz.weibo.com/"]) { display: none !important; }
-`,
+	.woo-box-flex:has(> .woo-picture-main img[src*="kadmimage.biz.weibo.com/"]),
+	.woo-picture-main:has(> img[src*="kadmimage.biz.weibo.com/"]) { display: none !important; }
+	`,
     ainit: function () {
       util.inject(function (rootKey) {
         const yawf = window[rootKey];
@@ -12927,8 +13491,54 @@ body .WB_handle ul li { flex: 1 1 auto; float: none; width: auto; }
   clean.CleanRule('related_feeds', () => i18n.cleanOtherRelatedFeeds, 1, {
     acss: '[yawf-obj-name="相关推荐"] { display: none !important; } #WB_webim .wbim_chat_box, #WB_webim .wbim_min_chat  { right: 20px !important; }',
     ref: { i: { type: 'bubble', icon: 'warn', template: () => i18n.cleanOtherRelatedFeedsDetail } },
+    v7Support: true,
+    ainit() {
+      observer.dom.add(function hideV7RelatedFeedsModule() {
+        const scope = document.querySelector('main') || document.body;
+        const panels = Array.from(scope.querySelectorAll([
+          '.woo-panel-main',
+          'article.woo-panel-main',
+          '.wbpro-side',
+        ].join(',')));
+        panels.forEach(panel => {
+          if (!(panel instanceof Element)) return;
+          if (panel.hasAttribute('yawf-hide-related-feeds')) return;
+          const titleEl = panel.querySelector('.wbpro-side-tit, header, h2, h3, .woo-box-item-flex');
+          const title = titleEl ? titleEl.textContent.replace(/[\u200b\r\n]+/g, '').trim() : '';
+          if (!title) return;
+          if (title === '相关推荐' || title === '相关微博推荐' || title === '相关微博') {
+            panel.setAttribute('yawf-hide-related-feeds', '');
+            panel.style.setProperty('display', 'none', 'important');
+          }
+        });
+      });
+    },
   });
-  clean.CleanRule('related_video', () => i18n.cleanOtherRelatedVideo, 1, '.video_box_more { display: none !important; }');
+  clean.CleanRule('related_video', () => i18n.cleanOtherRelatedVideo, 1, {
+    v7Support: true,
+    acss: '.video_box_more { display: none !important; }',
+    ainit() {
+      observer.dom.add(function hideV7RelatedVideoModule() {
+        const scope = document.querySelector('main') || document.body;
+        const panels = Array.from(scope.querySelectorAll([
+          '.woo-panel-main',
+          'article.woo-panel-main',
+          '.wbpro-side',
+        ].join(',')));
+        panels.forEach(panel => {
+          if (!(panel instanceof Element)) return;
+          if (panel.hasAttribute('yawf-hide-related-video')) return;
+          const titleEl = panel.querySelector('.wbpro-side-tit, header, h2, h3, .woo-box-item-flex');
+          const title = titleEl ? titleEl.textContent.replace(/[\u200b\r\n]+/g, '').trim() : '';
+          if (!title) return;
+          if (title === '相关视频推荐' || title === '相关视频') {
+            panel.setAttribute('yawf-hide-related-video', '');
+            panel.style.setProperty('display', 'none', 'important');
+          }
+        });
+      });
+    },
+  });
   clean.CleanRule('related_article', () => i18n.cleanOtherRelatedArticle, 1, '.WB_artical [node-type="recommend"] { display: none !important; }');
   clean.CleanRule('send_weibo', () => i18n.cleanOtherSendWeibo, 1, {
     acss: '.send_weibo_simple { display: none !important; }',
