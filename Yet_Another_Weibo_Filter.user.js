@@ -6338,6 +6338,7 @@ label:hover .yawf-config-checkbox-wrap .yawf-config-checkbox-icon,
       const lastRerun = this.lastRerun = {};
       await new Promise(resolve => setTimeout(resolve, 1000));
       if (this.lastRerun !== lastRerun) return;
+      if (typeof this.reapply !== 'function') return;
       this.reapply();
     }
     onBefore(callback) { this.before.push(callback); }
@@ -6751,31 +6752,59 @@ article[class*="Feed"].yawf-feed-filter-running::before { content: " "; display:
   const strings = util.strings;
 
   init.onLoad(function () {
-    const configs = {
-      text: {
-        show: yawf.rules.comment.text.show.ref.items.getConfig(),
-        hide: yawf.rules.comment.text.hide.ref.items.getConfig(),
-      },
-      regex: {
-        show: yawf.rules.comment.regex.show.ref.items.getConfigCompiled(),
-        hide: yawf.rules.comment.regex.hide.ref.items.getConfigCompiled(),
-      },
-      user: {
-        show: yawf.rules.comment.name.show.ref.items.getConfig(),
-        hide: yawf.rules.comment.name.hide.ref.items.getConfig(),
-      },
-      more: {
-        bot: yawf.rules.comment.more.commentByBot.getConfig(),
-      }
-	    };
+    const configs = {}; // Legacy placeholder, prefer reading live config from `yawf.rules.*` in page context.
+
+    // Wire `observer.comment.rerun()` to re-run V7 Vue comment list filtering.
+    // (Many comment rules still call `observer.comment.rerun()` on config changes.)
+    observer.comment.reapply = function () {
+      util.inject(function () {
+        if (typeof window.__yawf_commentFilterRerun === 'function') {
+          try { window.__yawf_commentFilterRerun(); } catch (e) { console.error(e); }
+        }
+      });
+    };
+
 	    util.inject(function (rootKey, configs) {
 	      const yawf = window[rootKey];
 	      const vueSetup = yawf.vueSetup;
+      const getConfig = function () {
+        try {
+          const rules = yawf.rules && yawf.rules.comment;
+          if (!rules) return configs;
+	          return {
+	            text: {
+	              show: rules.text.show.ref.items.getConfig(),
+	              hide: rules.text.hide.ref.items.getConfig(),
+	            },
+            regex: {
+              show: rules.regex.show.ref.items.getConfigCompiled(),
+              hide: rules.regex.hide.ref.items.getConfigCompiled(),
+            },
+            user: {
+              show: rules.name.show.ref.items.getConfig(),
+              hide: rules.name.hide.ref.items.getConfig(),
+            },
+	            more: {
+	              bot: rules.more.commentByBot.getConfig(),
+	              showMy: rules.more.showMyComment ? rules.more.showMyComment.getConfig() : false,
+	              withForward: rules.more.commentWithForward ? rules.more.commentWithForward.getConfig() : false,
+	              faceCountEnabled: rules.more.commentFaceCount.getConfig(),
+	              faceCount: rules.more.commentFaceCount.ref.count.getConfig(),
+	              faceTypesEnabled: rules.more.commentFaceTypes.getConfig(),
+	              faceTypes: rules.more.commentFaceTypes.ref.count.getConfig(),
+	              withoutContent: rules.more.commentWithoutContent.getConfig(),
+	            },
+	          };
+        } catch (e) {
+          console.error('[YAWF] getConfig failed', e);
+          return configs;
+        }
+      };
       const matchText = (comment, textList) => (
-        textList.some(text => comment.text_raw.includes(text))
+        textList.some(text => String(comment?.text_raw || comment?.text || '').includes(text))
       );
       const matchRegex = (comment, regexList) => (
-        regexList.some(regex => regex.test(comment.text_raw))
+        regexList.some(regex => regex.test(String(comment?.text_raw || comment?.text || '')))
       );
       const matchUser = (comment, nameList) => (
         nameList.some(name => (comment.screen_name === name ||
@@ -6784,19 +6813,99 @@ article[class*="Feed"].yawf-feed-filter-running::before { content: " "; display:
       const matchBot = comment => (
         comment.analysis_extra?.includes('ai_type')
       );
-      const filterComment = function (comment) {
+      const isMyComment = (comment, cfg) => {
+        if (!cfg?.more?.showMy) return false;
+        const me = yawf?.init?.page?.config?.user?.screen_name || yawf?.init?.page?.config?.user?.name || '';
+        if (!me) return false;
+        const name = comment?.user?.screen_name || comment?.screen_name || '';
+        return name && name === me;
+      };
+      const matchForward = (comment, cfg) => {
+        if (!cfg?.more?.withForward) return false;
+        const raw = String(comment?.text_raw || comment?.text || '');
+        if (!raw) return false;
+        const text = raw.replace(/<[^>]+>/g, '');
+        // Typical forwarded-style comments contain: //@user: ... or // @user ...
+        if (/\/\/\s*[@＠]/.test(text) || /\/\/@/.test(text)) return true;
+        return false;
+      };
+      const getEmojiAltList = comment => {
+        const html = String(comment?.text || '');
+        const alts = [];
+        // Prefer `<img ... alt="..." ...>` used by Weibo for emoji images.
+        const re = /<img[^>]*>/ig;
+        let m;
+        while ((m = re.exec(html)) !== null) {
+          const tag = m[0];
+          const alt = (tag.match(/\\salt=(['\"])(.*?)\\1/i)?.[2] || '').trim();
+          const type = (tag.match(/\\stype=(['\"])(.*?)\\1/i)?.[2] || '').trim();
+          const cls = (tag.match(/\\sclass=(['\"])(.*?)\\1/i)?.[2] || '').trim();
+          const src = (tag.match(/\\ssrc=(['\"])(.*?)\\1/i)?.[2] || '').trim();
+          // Most Weibo emoji images are `type="face"` and have an alt like "[xxx]".
+          // Still count any likely emoji img, even if alt has no brackets.
+          const looksLikeFace = type === 'face' || cls.includes('W_img_face') || (alt && /\\[[^\\]]+\\]/.test(alt));
+          if (!looksLikeFace) continue;
+          alts.push(alt || src || '[emoji]');
+        }
+        // Fallback to text_raw: count placeholders like "[捂嘴哭]".
+        if (!alts.length) {
+          const raw = String(comment?.text_raw || '');
+          const matches = raw.match(/\\[[^\\]\\n\\r]{1,12}\\]/g);
+          if (matches) alts.push(...matches);
+        }
+        return alts;
+      };
+      const matchEmojiCount = (comment, cfg) => {
+        if (!cfg.more.faceCountEnabled) return false;
+        const count = Number(cfg.more.faceCount || 0);
+        if (!(count > 0)) return false;
+        return getEmojiAltList(comment).length > count;
+      };
+      const matchEmojiTypes = (comment, cfg) => {
+        if (!cfg.more.faceTypesEnabled) return false;
+        const count = Number(cfg.more.faceTypes || 0);
+        if (!(count > 0)) return false;
+        const alts = getEmojiAltList(comment);
+        return (new Set(alts)).size > count;
+      };
+      const hasImage = comment => {
+        const pics = comment?.pic || comment?.pics || comment?.pic_ids || comment?.pic_id;
+        if (Array.isArray(pics)) return pics.length > 0;
+        if (typeof pics === 'string') return pics.length > 0;
+        if (pics && typeof pics === 'object') return true;
+        return false;
+      };
+      const matchWithoutContent = (comment, cfg) => {
+        if (!cfg.more.withoutContent) return false;
+        if (hasImage(comment)) return false;
+        const raw = String(comment?.text_raw || '');
+        // Remove emoji placeholders, mentions, and common boilerplate.
+        const cleaned = raw
+          .replace(/\\[[^\\]\\n\\r]{1,12}\\]/g, '')
+          .replace(/@[^\\s:：]+/g, '')
+          .replace(/回[复復覆]|Reply|微博|[转轉][发發]/ig, '')
+          .replace(/[:/\\s：.\\u200b]/g, '')
+          .trim();
+        return cleaned.length === 0;
+      };
+      const filterComment = function (comment, cfg) {
         try {
           const isShow = (
-            matchText(comment, configs.text.show) ||
-            matchRegex(comment, configs.regex.show) ||
-            matchUser(comment, configs.user.show) ||
+            matchText(comment, cfg.text.show) ||
+            matchRegex(comment, cfg.regex.show) ||
+            matchUser(comment, cfg.user.show) ||
+            isMyComment(comment, cfg) ||
             false);
           if (isShow) return 'show';
           const isHide = (
-            matchText(comment, configs.text.hide) ||
-            matchRegex(comment, configs.regex.hide) ||
-            matchUser(comment, configs.user.hide) ||
-            configs.more.bot && matchBot(comment) ||
+            matchText(comment, cfg.text.hide) ||
+            matchRegex(comment, cfg.regex.hide) ||
+            matchUser(comment, cfg.user.hide) ||
+            cfg.more.bot && matchBot(comment) ||
+            matchForward(comment, cfg) ||
+            matchEmojiCount(comment, cfg) ||
+            matchEmojiTypes(comment, cfg) ||
+            matchWithoutContent(comment, cfg) ||
             false);
 	          if (isHide) {
 	            return 'hide';
@@ -6807,9 +6916,9 @@ article[class*="Feed"].yawf-feed-filter-running::before { content: " "; display:
           return null;
         }
       };
-      const handleCommentSubList = function (sublist) {
+      const handleCommentSubList = function (sublist, cfg) {
         for (let index2 = 0; index2 < sublist.length;) {
-          const result2 = filterComment(sublist[index2]);
+          const result2 = filterComment(sublist[index2], cfg);
           if (result2 === 'hide') {
             sublist.splice(index2, 1);
             continue;
@@ -6817,36 +6926,65 @@ article[class*="Feed"].yawf-feed-filter-running::before { content: " "; display:
           index2++;
         }
       };
-      const handleCommentList = function (list) {
+      const handleCommentList = function (list, cfg) {
         for (let index1 = 0; index1 < list.length;) {
-          const result = filterComment(list[index1]);
+          const result = filterComment(list[index1], cfg);
           if (result === 'hide') {
             list.splice(index1, 1);
             continue;
           }
           const sublist = list[index1].comments;
           if (sublist) {
-            handleCommentSubList(sublist);
+            handleCommentSubList(sublist, cfg);
           }
           index1++;
         }
       };
-      vueSetup.eachComponentVM('repost-coment-list', vm => {
-        vm.$watch('list', handleCommentList, { immediate: true, deep: true })
+
+      /** @type {Set<() => void>} */
+      const rerunners = new Set();
+      window.__yawf_commentFilterRerun = function () {
+        const cfg = getConfig();
+        rerunners.forEach(fn => {
+          try { fn(cfg); } catch (e) { console.error(e); }
+        });
+      };
+
+      vueSetup.eachComponentVM('repost-comment-list', vm => {
+        const rerun = cfg => {
+          const list = vm && vm.list;
+          if (Array.isArray(list)) handleCommentList(list, cfg);
+        };
+        rerunners.add(rerun);
+        vm.$watch('list', list => {
+          if (Array.isArray(list)) handleCommentList(list, getConfig());
+        }, { immediate: true, deep: true });
       });
 	      vueSetup.eachComponentVM('feed', vm => {
 	        if (!vm?.data?.rcList) return;
+        const rerun = cfg => {
+          const rcList = vm?.data?.rcList;
+          if (Array.isArray(rcList)) handleCommentList(rcList, cfg);
+        };
+        rerunners.add(rerun);
 	        vm.$watch('data.rcList', rcList => {
-	          handleCommentList(rcList);
+	          if (Array.isArray(rcList)) handleCommentList(rcList, getConfig());
 	        }, { immediate: true, deep: true });
 	      });
       vueSetup.eachComponentVM('reply-modal', vm => {
         if (!vm.rootComment) return;
+        const rerun = cfg => {
+          const root = vm.rootComment;
+          if (root) handleCommentList([root], cfg);
+          const list = vm.list;
+          if (Array.isArray(list)) handleCommentSubList(list, cfg);
+        };
+        rerunners.add(rerun);
         vm.$watch('rootComment', rootComment => {
-          handleCommentList([rootComment]);
+          if (rootComment) handleCommentList([rootComment], getConfig());
         }, { immediate: true, deep: true });
         vm.$watch('list', list => {
-          handleCommentSubList(list);
+          if (Array.isArray(list)) handleCommentSubList(list, getConfig());
         }, { immediate: true, deep: true });
       });
     }, util.inject.rootKey, configs);
@@ -8607,6 +8745,7 @@ article[class*="Feed"].yawf-feed-filter-running::before { content: " "; display:
   };
 
   following.uncheckFollowPresenter = rule.Rule({
+    v7Support: true,
     id: 'uncheck_follow_presenter',
     version: 1,
     parent: following.following,
@@ -8614,9 +8753,9 @@ article[class*="Feed"].yawf-feed-filter-running::before { content: " "; display:
     initial: true,
     ainit() {
       observer.dom.add(function uncheckFollowPresenter() {
-        const inputs = Array.from(document.querySelectorAll('input[type="checkbox"][checked][action-data*="follow"]:not([yawf-uncheck-follow])'));
+        const inputs = Array.from(document.querySelectorAll('input[type="checkbox"][action-data*="follow"]:not([yawf-uncheck-follow])'));
         inputs.forEach(checkbox => {
-          checkbox.setAttribute('yawf-uncheck', '');
+          checkbox.setAttribute('yawf-uncheck-follow', '');
           if (checkbox.checked) checkbox.click();
         });
       });
@@ -9595,6 +9734,7 @@ article[class*="Feed"].yawf-feed-filter-running::before { content: " "; display:
   }, { priority: util.priority.BEFORE });
 
   manually.manuallyHideFeed = rule.Rule({
+    v7Support: true,
     id: 'filter_manually_hide',
     version: 1,
     parent: manually.manually,
@@ -9622,6 +9762,51 @@ article[class*="Feed"].yawf-feed-filter-running::before { content: " "; display:
       i: { type: 'bubble', icon: 'ask', template: () => i18n.manuallyHideFeedDetail },
     },
     ainit() {
+      const hideById = async function (id) {
+        if (!hideList) return;
+        const key = String(id || '').trim();
+        if (!key) return;
+        const list = hideList.getConfig();
+        list.unshift(key);
+        list.splice(1e4);
+        hideList.setConfig(list);
+        observer.feed.rerun();
+      };
+      const extractMblogidFromArticle = function (article) {
+        if (!(article instanceof Element)) return null;
+        const header = article.querySelector('header') || article;
+        const links = Array.from(header.querySelectorAll('a[href]')).slice(0, 80);
+        for (const a of links) {
+          const href = a.getAttribute('href');
+          if (!href) continue;
+          let u = null;
+          try { u = new URL(href, location.href); } catch (e) { continue; }
+          if (!/(\.|^)weibo\.com$/i.test(u.hostname)) continue;
+          const match = u.pathname.match(/^\/\d+\/([0-9A-Za-z]+)$/);
+          if (match && match[1]) return match[1];
+        }
+        return null;
+      };
+      const extractAuthorIdFromArticle = function (article) {
+        if (!(article instanceof Element)) return null;
+        const link = article.querySelector('a[href^="/u/"],a[href^="https://weibo.com/u/"]');
+        if (!link) return null;
+        const href = link.getAttribute('href');
+        if (!href) return null;
+        try {
+          const u = new URL(href, location.href);
+          const m = u.pathname.match(/^\/u\/(\d+)/);
+          return m && m[1] ? m[1] : null;
+        } catch (e) {
+          return null;
+        }
+      };
+      const animateRemove = function (el) {
+        if (!(el instanceof Element)) return;
+        el.setAttribute('style', 'transition: max-height 0.2s, opacity 0.2s; max-height: ' + el.clientHeight + 'px; overflow: hidden; position: relative;');
+        setTimeout(() => { el.style.maxHeight = '0px'; el.style.opacity = '0'; }, 0);
+        setTimeout(() => { if (el.parentNode) el.parentNode.removeChild(el); }, 250);
+      };
       const createScreen = function () {
         const screen = document.createElement('div');
         screen.classList = 'WB_screen W_fr';
@@ -9647,6 +9832,11 @@ article[class*="Feed"].yawf-feed-filter-running::before { content: " "; display:
         };
       };
       observer.feed.onFinally(function (feed) {
+        if (!hideList) return;
+
+        // V7 uses Vue feed data objects; skip legacy DOM button injection on V7.
+        if (document.querySelector('#app')) return;
+
         const [author] = feedParser.author.id(feed);
         const [fauthor] = feedParser.fauthor.id(feed);
         const authorId = fauthor || author;
@@ -9678,16 +9868,105 @@ article[class*="Feed"].yawf-feed-filter-running::before { content: " "; display:
 .WB_screen .yawf-hide-box ~ .screen_box .W_ficon, .WB_screen .yawf-hide_box .W_ficon { width: 20px; }
 .WB_screen .yawf-hide-box ~ .screen_box .layer_menu_list { right: -4px; }
 .WB_expand .WB_screen { margin-top: 5px; }
+
+/* V7 manual hide button */
+.yawf-hide-box-v7 { position: absolute; top: 8px; right: 8px; z-index: 10; width: 26px; height: 26px; line-height: 24px; border-radius: 13px; border: 1px solid rgba(0,0,0,.15); background: rgba(255,255,255,.75); color: #333; font-size: 18px; cursor: pointer; padding: 0; }
+.yawf-hide-box-v7:hover { background: rgba(255,255,255,.95); }
+/* V7 feeds usually already have a menu button at the top-right; keep our hide button from overlapping it. */
+#homeWrap article .yawf-hide-box-v7 { right: 44px; }
 `);
+
+      // V7: DOM-based button injection for feed cards (articles) in the home feed list.
+      observer.dom.add(function injectV7ManualHideButtons() {
+        if (!document.querySelector('#app')) return;
+        if (!hideList) return;
+        const homeWrap = document.querySelector('#homeWrap');
+        if (!homeWrap) return;
+
+        const hidden = new Set(hideList.getConfig().map(String));
+        const applyHidden = function (article) {
+          const mblogid = extractMblogidFromArticle(article);
+          if (!mblogid) return false;
+          if (!hidden.has(String(mblogid))) return false;
+          article.setAttribute('yawf-hidden-by-list', '');
+          article.style.setProperty('display', 'none', 'important');
+          return true;
+        };
+
+        // First, hide already-hidden feeds (persistence across reload).
+        Array.from(homeWrap.querySelectorAll('article:not([yawf-hidden-by-list])')).slice(0, 400).forEach(article => {
+          if (!(article instanceof Element)) return;
+          applyHidden(article);
+        });
+
+        const articles = Array.from(homeWrap.querySelectorAll('article:not([yawf-hide-box-v7])')).slice(0, 200);
+        articles.forEach(article => {
+          if (!(article instanceof Element)) return;
+          const mblogid = extractMblogidFromArticle(article);
+          if (!mblogid) return;
+          if (hidden.has(String(mblogid))) {
+            applyHidden(article);
+            return;
+          }
+          const authorId = extractAuthorIdFromArticle(article);
+          if (authorId && authorId === init.page.config.user.idstr) return;
+
+          article.setAttribute('yawf-hide-box-v7', '');
+          article.style.position = article.style.position || 'relative';
+
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.className = 'yawf-hide-box-v7';
+          button.textContent = '×';
+          button.title = i18n.hideThisFeed;
+          button.addEventListener('click', async event => {
+            if (!event.isTrusted) return;
+            await hideById(mblogid);
+            animateRemove(article);
+          });
+
+          const header = article.querySelector('header') || article;
+          header.appendChild(button);
+        });
+      });
     },
     init() {
       observer.feed.filter(function showMyFeed(feed) {
         // 选项的开关只影响是否显示按钮，过滤规则总是执行
-        const mid = feed.getAttribute('mid');
-        const omid = feed.getAttribute('omid');
+        if (!hideList) return null;
         const midList = hideList.getConfig();
-        if (midList.includes(mid)) return 'hide';
-        if (midList.includes(omid)) return 'hide';
+
+        const ids = [];
+        if (feed instanceof Element) {
+          const mid = feed.getAttribute ? feed.getAttribute('mid') : null;
+          const omid = feed.getAttribute ? feed.getAttribute('omid') : null;
+          if (mid) ids.push(String(mid));
+          if (omid) ids.push(String(omid));
+          if (document.querySelector('#app') && feed.matches && feed.matches('article') && feed.closest && feed.closest('#homeWrap')) {
+            // Prefer the time/detail link (main id) and the retweet time link (original id).
+            const links = Array.from((feed.querySelector('header') || feed).querySelectorAll('a[href]')).slice(0, 50);
+            for (const a of links) {
+              const href = a.getAttribute('href');
+              if (!href) continue;
+              let u = null;
+              try { u = new URL(href, location.href); } catch (e) { continue; }
+              if (!/(\.|^)weibo\.com$/i.test(u.hostname)) continue;
+              const m = u.pathname.match(/^\/\d+\/([0-9A-Za-z]+)$/);
+              if (m && m[1]) { ids.push(m[1]); break; }
+            }
+          }
+        } else if (feed && typeof feed === 'object') {
+          const mid = feed.mid || feed.idstr || feed.id || null;
+          const omid = feed.retweeted_status?.mid || feed.ori_mid || feedParser.omid(feed) || null;
+          const mblogid = feed.mblogid || feed.mblog_id || null;
+          const omblogid = feed.retweeted_status?.mblogid || feed.retweeted_status?.mblog_id || null;
+          if (mid != null) ids.push(String(mid));
+          if (omid != null) ids.push(String(omid));
+          if (mblogid != null) ids.push(String(mblogid));
+          if (omblogid != null) ids.push(String(omblogid));
+        }
+
+        if (ids.some(id => midList.includes(id))) return 'hide';
         return null;
       }, { priority: 1e4 });
     },
@@ -9765,6 +10044,7 @@ article[class*="Feed"].yawf-feed-filter-running::before { content: " "; display:
 
 
   pause.pauseFilter = rule.Rule({
+    v7Support: true,
     id: 'pause_filter',
     version: 1,
     parent: pause.pause,
@@ -9837,6 +10117,8 @@ article[class*="Feed"].yawf-feed-filter-running::before { content: " "; display:
         if (!rule.isEnabled()) return;
         const type = init.page.type();
         if (type === 'fav' || type === 'like') return;
+        // V7 feed events may pass feed data objects instead of DOM nodes.
+        if (!feed || typeof feed.closest !== 'function') return;
         const list = feed.closest('.WB_feed');
         if (!list) return; // 搜索页面
         const container = list.parentNode;
@@ -10332,6 +10614,7 @@ article[class*="Feed"].yawf-feed-filter-running::before { content: " "; display:
 
   const additionalRules = function () {
     original.id.discover = rule.Rule({
+      v7Support: true,
       id: 'filter_original_discover',
       version: 1,
       parent: original.id.id,
@@ -11006,6 +11289,7 @@ header[content_auth="5"] ~ * { display: none !important; }
   };
 
   commercial.weiboPay = rule.Rule({
+    v7Support: true,
     id: 'filter_weibo_pay',
     version: 1,
     parent: commercial.commercial,
@@ -11017,8 +11301,25 @@ header[content_auth="5"] ~ * { display: none !important; }
       const rule = this;
       observer.feed.filter(function weiboProductFeedFilter(feed) {
         if (!rule.isEnabled()) return null;
-        if (feed.querySelector('div[action-data*="objectid=1042025:"]')) return 'hide';
-        if (feed.querySelector('a[suda-uatrack*="1042025-webpage"]')) return 'hide';
+        // V6 DOM
+        if (feed && typeof feed.querySelector === 'function') {
+          if (feed.querySelector('div[action-data*="objectid=1042025:"]')) return 'hide';
+          if (feed.querySelector('a[suda-uatrack*="1042025-webpage"]')) return 'hide';
+          return null;
+        }
+
+        // V7 data
+        const has1042025 = v => typeof v === 'string' && v.includes('1042025');
+        if (Array.isArray(feed?.url_struct)) {
+          if (feed.url_struct.some(url => has1042025(String(url?.actionlog?.oid || '')))) return 'hide';
+          if (feed.url_struct.some(url => has1042025(String(url?.long_url || '')))) return 'hide';
+          if (feed.url_struct.some(url => has1042025(String(url?.ori_url || '')))) return 'hide';
+          if (feed.url_struct.some(url => has1042025(String(url?.short_url || '')))) return 'hide';
+          if (feed.url_struct.some(url => has1042025(String(url?.url_title || '')))) return 'hide';
+        }
+        try {
+          if (feed?.page_info && has1042025(JSON.stringify(feed.page_info))) return 'hide';
+        } catch (e) { /* ignore */ }
         return null;
       });
       this.addConfigListener(() => { observer.feed.rerun(); });
@@ -11187,6 +11488,7 @@ header[content_auth="5"] ~ * { display: none !important; }
   };
 
   content.commentAndForward = rule.Rule({
+    v7Support: true,
     id: 'filter_comment_and_forward',
     version: 1,
     parent: content.content,
@@ -11200,10 +11502,27 @@ header[content_auth="5"] ~ * { display: none !important; }
         if (!rule.isEnabled()) return null;
         const replyText = ['回复', '回復', '回覆', 'Reply', 'reply'];
         if (!feedParser.isForward(feed)) return null;
-        const content = feed.querySelector('[node-type="feed_list_content"]'); if (!content) return null;
-        if (!content.firstChild || !replyText.includes(content.firstChild.textContent.trim())) return null;
-        if (!content.childNodes[1] || !content.childNodes[1].getAttribute('usercard')) return null;
-        return 'hide';
+
+        // V6 DOM
+        if (feed && typeof feed.querySelector === 'function') {
+          const content = feed.querySelector('[node-type="feed_list_content"]'); if (!content) return null;
+          if (!content.firstChild || !replyText.includes(content.firstChild.textContent.trim())) return null;
+          if (!content.childNodes[1] || !content.childNodes[1].getAttribute('usercard')) return null;
+          return 'hide';
+        }
+
+        // V7 data (best-effort): reply-forward text usually starts with "回复@xxx:"
+        const raw = String(feed?.longTextContent_raw || feed?.text_raw || feed?.text || '');
+        const head = raw.replace(/^[\s\u200b]+/, '').slice(0, 20);
+        if (replyText.some(t => head.startsWith(t))) {
+          // require @ at the beginning-ish to reduce false positives
+          const rest = head.slice(0, 20);
+          if (/@/.test(rest) || /@/.test(raw.slice(0, 60))) return 'hide';
+        }
+        if (/^回复\s*@/i.test(raw.replace(/^[\s\u200b]+/, ''))) return 'hide';
+        if (/^回复@/i.test(raw.replace(/^[\s\u200b]+/, ''))) return 'hide';
+
+        return null;
       });
       this.addConfigListener(() => { observer.feed.rerun(); });
     },
@@ -11254,6 +11573,7 @@ header[content_auth="5"] ~ * { display: none !important; }
   };
 
   content.redPack = rule.Rule({
+    v7Support: true,
     id: 'filter_red_pack',
     version: 1,
     parent: content.content,
@@ -11265,10 +11585,27 @@ header[content_auth="5"] ~ * { display: none !important; }
       const rule = this;
       observer.feed.filter(function redPackFeedFilter(feed) {
         if (!rule.isEnabled()) return null;
-        if (feed.querySelector('.PCD_event_red2014')) return 'hide';
-        if (feed.querySelector('.WB_feed_spec_red2015')) return 'hide';
-        if (feed.querySelector('.WB_feed_spec_red16')) return 'hide';
-        if (feed.querySelector('.media-redpacket')) return 'hide';
+        // V6 DOM
+        if (feed && typeof feed.querySelector === 'function') {
+          if (feed.querySelector('.PCD_event_red2014')) return 'hide';
+          if (feed.querySelector('.WB_feed_spec_red2015')) return 'hide';
+          if (feed.querySelector('.WB_feed_spec_red16')) return 'hide';
+          if (feed.querySelector('.media-redpacket')) return 'hide';
+          return null;
+        }
+
+        // V7 data (hongbao/redpacket cards/links)
+        const urlMatch = str => typeof str === 'string' && /(?:^|[/:.])hongbao\.weibo\.com\/hongbao|weibo\.com\/hongbao|sina\.com\.cn\/hongbao|redpacket/i.test(str);
+        if (Array.isArray(feed?.url_struct)) {
+          if (feed.url_struct.some(url => urlMatch(url?.long_url))) return 'hide';
+          if (feed.url_struct.some(url => urlMatch(url?.ori_url))) return 'hide';
+          if (feed.url_struct.some(url => urlMatch(url?.short_url))) return 'hide';
+          if (feed.url_struct.some(url => urlMatch(url?.url_title))) return 'hide';
+          if (feed.url_struct.some(url => urlMatch(String(url?.actionlog?.oid || '')))) return 'hide';
+        }
+        try {
+          if (feed?.page_info && /hongbao|redpacket/i.test(JSON.stringify(feed.page_info))) return 'hide';
+        } catch (e) { /* ignore */ }
         return null;
       });
       this.addConfigListener(() => { observer.feed.rerun(); });
@@ -11316,6 +11653,7 @@ header[content_auth="5"] ~ * { display: none !important; }
   };
 
   content.koiForward = rule.Rule({
+    v7Support: true,
     id: 'filter_koi_forward',
     version: 1,
     parent: content.content,
@@ -11327,7 +11665,25 @@ header[content_auth="5"] ~ * { display: none !important; }
       const rule = this;
       observer.feed.filter(function koiForwardFeedFilter(feed) {
         if (!rule.isEnabled()) return null;
-        if (feed.querySelector('a[action-type="fl_forward"] .icon_jinli')) return 'hide';
+        // V6 DOM
+        if (feed && typeof feed.querySelector === 'function') {
+          if (feed.querySelector('a[action-type="fl_forward"] .icon_jinli')) return 'hide';
+          return null;
+        }
+
+        // V7 data (lottery/draw cards)
+        const match = str => typeof str === 'string' && /(jinli|锦鲤|抽奖|抽獎|lottery|choujiang|轉發抽獎|转发抽奖)/i.test(str);
+        if (Array.isArray(feed?.url_struct)) {
+          if (feed.url_struct.some(url => match(url?.url_title))) return 'hide';
+          if (feed.url_struct.some(url => match(url?.long_url))) return 'hide';
+          if (feed.url_struct.some(url => match(url?.ori_url))) return 'hide';
+          if (feed.url_struct.some(url => match(url?.short_url))) return 'hide';
+          if (feed.url_struct.some(url => match(String(url?.actionlog?.oid || '')))) return 'hide';
+        }
+        if (match(String(feed?.title?.type || ''))) return 'hide';
+        try {
+          if (feed?.page_info && match(JSON.stringify(feed.page_info))) return 'hide';
+        } catch (e) { /* ignore */ }
         return null;
       });
       this.addConfigListener(() => { observer.feed.rerun(); });
@@ -11344,6 +11700,7 @@ header[content_auth="5"] ~ * { display: none !important; }
   };
 
   content.appItem = rule.Rule({
+    v7Support: true,
     id: 'filter_app_item',
     version: 1,
     parent: content.content,
@@ -11355,7 +11712,26 @@ header[content_auth="5"] ~ * { display: none !important; }
       const rule = this;
       observer.feed.filter(function appItemFeedFilter(feed) {
         if (!rule.isEnabled()) return null;
-        if (feed.querySelector('.WB_feed_spec[exp-data*="key=tblog_weibocard"][exp-data*="1042005-appItem"]')) return 'hide';
+
+        // V6 DOM
+        if (feed && typeof feed.querySelector === 'function') {
+          if (feed.querySelector('.WB_feed_spec[exp-data*="key=tblog_weibocard"][exp-data*="1042005-appItem"]')) return 'hide';
+          return null;
+        }
+
+        // V7 data (best-effort): app cards/links
+        const match = str => typeof str === 'string' && /(1042005|appitem|weibocard|微博应用)/i.test(str);
+        if (Array.isArray(feed?.url_struct)) {
+          if (feed.url_struct.some(url => match(url?.url_title))) return 'hide';
+          if (feed.url_struct.some(url => match(url?.long_url))) return 'hide';
+          if (feed.url_struct.some(url => match(url?.ori_url))) return 'hide';
+          if (feed.url_struct.some(url => match(url?.short_url))) return 'hide';
+          if (feed.url_struct.some(url => match(String(url?.actionlog?.oid || '')))) return 'hide';
+          if (feed.url_struct.some(url => match(String(url?.object_type || '')))) return 'hide';
+        }
+        try {
+          if (feed?.page_info && match(JSON.stringify(feed.page_info))) return 'hide';
+        } catch (e) { /* ignore */ }
         return null;
       });
       this.addConfigListener(() => { observer.feed.rerun(); });
@@ -11372,6 +11748,7 @@ header[content_auth="5"] ~ * { display: none !important; }
   };
 
   content.wenda = rule.Rule({
+    v7Support: true,
     id: 'filter_wenda',
     version: 1,
     parent: content.content,
@@ -11383,9 +11760,28 @@ header[content_auth="5"] ~ * { display: none !important; }
       const rule = this;
       observer.feed.filter(function wendaFeedFilter(feed) {
         if (!rule.isEnabled()) return null;
-        // 这条规则不在显示某人的全部问答页面生效，避免显示空页面
-        if (feed.matches('[id^="Pl_Core_WendaList__"] *')) return null;
-        if (feed.querySelector('[suda-uatrack*="1022-wenda"]')) return 'hide';
+        // V6 DOM
+        if (feed && typeof feed.querySelector === 'function') {
+          // 这条规则不在显示某人的全部问答页面生效，避免显示空页面
+          if (typeof feed.matches === 'function' && feed.matches('[id^="Pl_Core_WendaList__"] *')) return null;
+          if (feed.querySelector('[suda-uatrack*="1022-wenda"]')) return 'hide';
+          return null;
+        }
+
+        // V7 data (wenda / Q&A)
+        // Avoid blanking dedicated Q&A pages if any.
+        if (/wenda/i.test(location.pathname)) return null;
+        const match = str => typeof str === 'string' && /wenda|问答|問答/i.test(str);
+        if (Array.isArray(feed?.url_struct)) {
+          if (feed.url_struct.some(url => match(url?.url_title))) return 'hide';
+          if (feed.url_struct.some(url => match(url?.long_url))) return 'hide';
+          if (feed.url_struct.some(url => match(url?.ori_url))) return 'hide';
+          if (feed.url_struct.some(url => match(url?.short_url))) return 'hide';
+          if (feed.url_struct.some(url => match(String(url?.actionlog?.oid || '')))) return 'hide';
+        }
+        try {
+          if (feed?.page_info && match(JSON.stringify(feed.page_info))) return 'hide';
+        } catch (e) { /* ignore */ }
         return null;
       });
       this.addConfigListener(() => { observer.feed.rerun(); });
@@ -11402,6 +11798,7 @@ header[content_auth="5"] ~ * { display: none !important; }
   };
 
   content.wenwoDr = rule.Rule({
+    v7Support: true,
     id: 'filter_wenwo_dr',
     version: 1,
     parent: content.content,
@@ -11413,10 +11810,27 @@ header[content_auth="5"] ~ * { display: none !important; }
       const rule = this;
       observer.feed.filter(function wenwoDrFeedFilter(feed) {
         if (!rule.isEnabled()) return null;
-        if (feed.querySelector('div[action-data*="objectid=2017896001:"]')) return 'hide';
-        if (feed.querySelector('a[suda-uatrack*="2017896001-product"]')) return 'hide';
-        if (feed.querySelector('[exp-data*="2243615001-product"]')) return 'hide';
-        if (feed.querySelector('a[href*="//dr.wenwo.com/"]')) return 'hide';
+        // V6 DOM
+        if (feed && typeof feed.querySelector === 'function') {
+          if (feed.querySelector('div[action-data*="objectid=2017896001:"]')) return 'hide';
+          if (feed.querySelector('a[suda-uatrack*="2017896001-product"]')) return 'hide';
+          if (feed.querySelector('[exp-data*="2243615001-product"]')) return 'hide';
+          if (feed.querySelector('a[href*="//dr.wenwo.com/"]')) return 'hide';
+          return null;
+        }
+
+        // V7 data (wenwo.com / 爱问医生)
+        const match = str => typeof str === 'string' && /(wenwo\.com|dr\.wenwo\.com|爱问医生|愛問醫生|2017896001|2243615001)/i.test(str);
+        if (Array.isArray(feed?.url_struct)) {
+          if (feed.url_struct.some(url => match(url?.url_title))) return 'hide';
+          if (feed.url_struct.some(url => match(url?.long_url))) return 'hide';
+          if (feed.url_struct.some(url => match(url?.ori_url))) return 'hide';
+          if (feed.url_struct.some(url => match(url?.short_url))) return 'hide';
+          if (feed.url_struct.some(url => match(String(url?.actionlog?.oid || '')))) return 'hide';
+        }
+        try {
+          if (feed?.page_info && match(JSON.stringify(feed.page_info))) return 'hide';
+        } catch (e) { /* ignore */ }
         return null;
       });
       this.addConfigListener(() => { observer.feed.rerun(); });
@@ -11440,6 +11854,7 @@ header[content_auth="5"] ~ * { display: none !important; }
   };
 
   content.yizhibo = rule.Rule({
+    v7Support: true,
     id: 'filter_yizhibo',
     version: 1,
     parent: content.content,
@@ -11458,10 +11873,31 @@ header[content_auth="5"] ~ * { display: none !important; }
       observer.feed.filter(function yizhiboFeedFilter(feed) {
         if (!rule.isEnabled()) return null;
         const type = rule.ref.type.getConfig();
-        const live = feed.querySelector('.WB_video[action-data*="type=feedlive"]');
-        if (!live) return null;
+        // V6 DOM
+        if (feed && typeof feed.querySelector === 'function') {
+          const live = feed.querySelector('.WB_video[action-data*="type=feedlive"]');
+          if (!live) return null;
+          if (type === 'all') return 'hide';
+          if (typeof live.matches === 'function' && live.matches('[action-data*="is_replay=1"]')) return 'hide';
+          return null;
+        }
+
+        // V7 data (yizhibo live/replay)
+        const match = str => typeof str === 'string' && /yizhibo|一直播/i.test(str);
+        const replayMatch = str => typeof str === 'string' && /(is_replay=1|replay|回放)/i.test(str);
+        let matched = false;
+        let isReplay = false;
+        if (Array.isArray(feed?.url_struct)) {
+          matched = feed.url_struct.some(url => match(url?.url_title) || match(url?.long_url) || match(url?.ori_url) || match(url?.short_url));
+          isReplay = feed.url_struct.some(url => replayMatch(url?.long_url) || replayMatch(url?.ori_url) || replayMatch(url?.short_url) || replayMatch(url?.url_title));
+        }
+        try {
+          if (!matched && feed?.page_info) matched = match(JSON.stringify(feed.page_info));
+          if (!isReplay && feed?.page_info) isReplay = replayMatch(JSON.stringify(feed.page_info));
+        } catch (e) { /* ignore */ }
+        if (!matched) return null;
         if (type === 'all') return 'hide';
-        if (live.matches('[action-data*="is_replay=1"]')) return 'hide';
+        if (isReplay) return 'hide';
         return null;
       });
       this.addConfigListener(() => { observer.feed.rerun(); });
@@ -11510,6 +11946,7 @@ header[content_auth="5"] ~ * { display: none !important; }
   };
 
   content.multipleTopics = rule.Rule({
+    v7Support: true,
     id: 'filter_multiple_topics_feed',
     version: 1,
     parent: content.content,
@@ -11523,7 +11960,7 @@ header[content_auth="5"] ~ * { display: none !important; }
       observer.feed.filter(function multipleTopicsFilter(feed) {
         if (!rule.isEnabled()) return null;
         const limit = rule.ref.num.getConfig();
-        const topics = feedParser.topic.dom(feed);
+        const topics = (feed && typeof feed.querySelector === 'function') ? feedParser.topic.dom(feed) : feedParser.topic.text(feed);
         if (topics.length >= limit) return 'hide';
         return null;
       });
@@ -11601,6 +12038,7 @@ header[content_auth="5"] ~ * { display: none !important; }
       const pascalCaseType = pageType.replace(/^./, c => c.toUpperCase());
       link[pageType] = rule.Rule({
         weiboVersion: [6, 7],
+        v7Support: true,
         id: `filter_${pascalCaseType}`,
         version: 30,
         parent: link.link,
@@ -11707,6 +12145,7 @@ header[content_auth="5"] ~ * { display: none !important; }
   });
 
   flooding.floodingAuthor = rule.Rule({
+    v7Support: true,
     id: 'flooding_author',
     version: 1,
     parent: flooding.flooding,
@@ -11722,12 +12161,12 @@ header[content_auth="5"] ~ * { display: none !important; }
     },
     init() {
       const rule = this;
-      /** @type {WeakMap<Element, string>} */
-      const parsed = new WeakMap();
+      /** @type {WeakMap<object, string>} */
+      let parsed = new WeakMap();
+      /** @type {Map<string, number>} */
+      let countByAuthor = new Map();
       observer.feed.filter(function floodingAuthor(feed) {
         if (!rule.isEnabled()) return null;
-        // 如果是因为修改规则导致的重新计算，那么我们不再做一次处理
-        if (parsed.has(feed)) return null;
         const me = init.page.config.user.idstr;
         const [author] = feedParser.author.id(feed);
         const [fauthor] = feedParser.fauthor.id(feed);
@@ -11740,18 +12179,27 @@ header[content_auth="5"] ~ * { display: none !important; }
         if (init.page.type() === 'group') {
           if (rule.ref.group.getConfig()) return null;
         }
+
+        // Avoid double-counting during the same run; re-run resets this cache.
+        if (parsed.has(feed)) return null;
         parsed.set(feed, authorId);
-        const feeds = [...document.querySelectorAll('.WB_feed_type')];
-        const count = feeds.filter(feed => parsed.get(feed) === authorId).length;
+
+        const count = (countByAuthor.get(authorId) || 0) + 1;
+        countByAuthor.set(authorId, count);
         if (count <= rule.ref.number.getConfig()) return null;
         const reason = i18n.floodingAuthorReason;
         return { result: 'hide', reason };
       }, { priority: -1e6 });
-      this.addConfigListener(() => { observer.feed.rerun(); });
+      this.addConfigListener(() => {
+        parsed = new WeakMap();
+        countByAuthor = new Map();
+        observer.feed.rerun();
+      });
     },
   });
 
   flooding.floodingForward = rule.Rule({
+    v7Support: true,
     id: 'flooding_forward',
     version: 1,
     parent: flooding.flooding,
@@ -11766,21 +12214,30 @@ header[content_auth="5"] ~ * { display: none !important; }
     },
     init() {
       const rule = this;
-      /** @type {WeakMap<Element, string>} */
-      const parsed = new WeakMap();
+      /** @type {WeakMap<object, string>} */
+      let parsed = new WeakMap();
+      /** @type {Map<string, number>} */
+      let countByOmid = new Map();
       observer.feed.filter(function floodingAuthor(feed) {
         if (!rule.isEnabled()) return null;
-        if (parsed.has(feed)) return null;
         const omid = feedParser.omid(feed) || null;
-        parsed.set(feed, omid);
         if (!omid) return null;
-        const feeds = [...document.querySelectorAll('[mid]')];
-        const count = feeds.filter(feed => parsed.get(feed) === omid).length;
+
+        // Avoid double-counting during the same run; re-run resets this cache.
+        if (parsed.has(feed)) return null;
+        parsed.set(feed, omid);
+
+        const count = (countByOmid.get(omid) || 0) + 1;
+        countByOmid.set(omid, count);
         if (count <= rule.ref.number.getConfig()) return null;
         const reason = i18n.floodingForwardReason;
         return { result: 'hide', reason };
       }, { priority: -1e6 });
-      this.addConfigListener(() => { observer.feed.rerun(); });
+      this.addConfigListener(() => {
+        parsed = new WeakMap();
+        countByOmid = new Map();
+        observer.feed.rerun();
+      });
     },
   });
 
@@ -11840,6 +12297,7 @@ header[content_auth="5"] ~ * { display: none !important; }
   };
 
   layout.commentByTime = rule.Rule({
+    v7Support: true,
     id: 'comment_layout_by_time',
     version: 1,
     parent: layout.layout,
@@ -11853,6 +12311,151 @@ header[content_auth="5"] ~ * { display: none !important; }
         allButtons.forEach(button => {
           button.setAttribute('yawf-all-comment', 'yawf-all-comment');
           if (!button.classList.contains('curr')) button.click();
+        });
+      });
+      observer.dom.add(function switchV7CommentSortToTime() {
+        // V7 only
+        if (!document.querySelector('#app')) return;
+
+        const normalize = text => String(text || '').replace(/[\u200b\r\n]+/g, ' ').replace(/[ \t]+/g, ' ').trim();
+        const isActive = el => {
+          if (!(el instanceof Element)) return false;
+          if (el.getAttribute('aria-selected') === 'true') return true;
+          if (el.getAttribute('aria-current') === 'true') return true;
+          const cls = el.className ? String(el.className) : '';
+          return /(active|current|selected)/i.test(cls) || el.classList.contains('curr');
+        };
+        const tryClick = el => {
+          if (!(el instanceof Element)) return false;
+          if (el.hasAttribute('yawf-comment-by-time-clicked')) return false;
+          el.setAttribute('yawf-comment-by-time-clicked', '');
+          try { el.click(); return true; } catch (e) { return false; }
+        };
+        const parseTimeText = text => {
+          const t = normalize(text);
+          if (!t) return null;
+          const match = t.match(
+            /(\d{4}-\d{1,2}-\d{1,2}\s*\d{1,2}:\d{2}|\d{2}-\d{1,2}-\d{1,2}\s*\d{1,2}:\d{2}|\d{1,2}-\d{1,2}\s*\d{1,2}:\d{2}|(?:今天|today)\s*\d{1,2}:\d{2}|\d+\s*(?:分钟前|分鐘前|mins ago)|\d+\s*(?:秒前|secs ago))/i
+          );
+          if (!match) return null;
+          let timeText = normalize(match[1]);
+          if (/^\d{2}-\d/.test(timeText)) timeText = '20' + timeText;
+          const dt = util.time.parse(timeText);
+          return dt ? dt.getTime() : null;
+        };
+        const findNearestCommentList = (scope, tabRect) => {
+          const lists = Array.from(scope.querySelectorAll('.wbpro-list')).filter(Boolean);
+          if (!lists.length) return null;
+          let best = null;
+          let bestDist = Infinity;
+          lists.forEach(list => {
+            if (!(list instanceof Element)) return;
+            const r = list.getBoundingClientRect();
+            if (r.height <= 0) return;
+            // Prefer lists right under the tab controls.
+            const dist = Math.abs(r.top - (tabRect ? tabRect.bottom : r.top));
+            if (dist < bestDist) {
+              bestDist = dist;
+              best = list;
+            }
+          });
+          return best;
+        };
+        const reorderCommentsByTime = (list, timeBtn, hotBtn) => {
+          if (!(list instanceof Element)) return false;
+          const items = Array.from(list.children).filter(el => {
+            if (!(el instanceof Element)) return false;
+            // Only reorder comment-like items
+            if (!el.querySelector('.text')) return false;
+            if (!el.querySelector('.info')) return false;
+            return true;
+          });
+          if (items.length < 2) return false;
+
+          const mapped = items.map((el, index) => {
+            const info = el.querySelector('.info');
+            const ts = parseTimeText(info ? info.textContent : '');
+            return { el, index, ts };
+          });
+          const parseable = mapped.filter(x => x.ts != null).length;
+          if (parseable < 2) return false;
+
+          const sorted = mapped.slice().sort((a, b) => {
+            const at = a.ts == null ? -Infinity : a.ts;
+            const bt = b.ts == null ? -Infinity : b.ts;
+            return (bt - at) || (a.index - b.index);
+          });
+
+          const sameOrder = mapped.every((x, i) => sorted[i] && sorted[i].el === x.el);
+          if (!sameOrder) {
+            sorted.forEach(x => { list.appendChild(x.el); });
+          }
+
+          // UI hint: mark time tab as active if we had to reorder without a trusted click.
+          try {
+            if (hotBtn && hotBtn.classList) hotBtn.classList.remove('curr');
+            if (timeBtn && timeBtn.classList) timeBtn.classList.add('curr');
+          } catch (e) { /* ignore */ }
+
+          list.setAttribute('yawf-comment-by-time-reordered', '');
+          return true;
+        };
+
+        // Find tab-like controls near comment list
+        const scopes = Array.from(document.querySelectorAll([
+          'main',
+          'div[role="dialog"]',
+          '.woo-modal-wrap',
+          '.woo-modal',
+        ].join(','))).filter(Boolean);
+        if (!scopes.length) scopes.push(document.body);
+
+	        scopes.forEach(scope => {
+	          if (!(scope instanceof Element)) return;
+
+          const candidates = Array.from(scope.querySelectorAll('button,[role="tab"],a,[role="button"],div.item')).slice(0, 1200);
+          const timeBtns = candidates.filter(btn => {
+            if (!(btn instanceof Element)) return false;
+            const t = normalize(btn.textContent);
+            if (!t || t.length > 8) return false;
+            // Prefer explicit "时间/最新"
+            return t === '时间' || t === '最新' || t === '按时间' || t === '按最新' || t === '按時間' || t === '最新' || t === '時間';
+          });
+          if (!timeBtns.length) return;
+
+          // Only click when there is also a "hot" option to avoid mis-clicking random "最新微博" nav etc.
+          const hotBtn = candidates.find(btn => {
+            const t = normalize(btn.textContent);
+            return t === '热度' || t === '最热' || t === '熱門' || t === '熱度' || t === '按热度' || t === '按熱門' || t === '按熱度';
+          }) || null;
+          if (!hotBtn) return;
+
+          // Click the first non-active time button.
+          const timeBtn = timeBtns[0];
+          if (!timeBtn) return;
+
+          const tabContainer = (hotBtn.parentElement && hotBtn.parentElement === timeBtn.parentElement) ? hotBtn.parentElement : null;
+          if (tabContainer && !tabContainer.hasAttribute('yawf-comment-sort-listener')) {
+            tabContainer.setAttribute('yawf-comment-sort-listener', '');
+            tabContainer.addEventListener('click', e => {
+              if (e && e.isTrusted) tabContainer.setAttribute('yawf-comment-sort-user-touched', '');
+            }, true);
+          }
+
+          // Respect user choice after they interact with tabs.
+          if (tabContainer && tabContainer.hasAttribute('yawf-comment-sort-user-touched')) return;
+
+          // Already on time sort (trusted click worked) -> nothing to do.
+          if (isActive(timeBtn)) return;
+
+          // Try switching tab first; if it doesn't take effect (untrusted click), fall back to DOM reorder.
+          tryClick(timeBtn);
+          if (isActive(timeBtn)) return;
+
+          const tabRect = (tabContainer || timeBtn).getBoundingClientRect();
+          const list = findNearestCommentList(scope, tabRect);
+          if (!list) return;
+          reorderCommentsByTime(list, timeBtn, hotBtn);
         });
       });
       observer.comment.onBefore(function switchToAllComment(comment) {
@@ -11876,6 +12479,7 @@ header[content_auth="5"] ~ * { display: none !important; }
   };
 
   layout.hideSubComment = rule.Rule({
+    v7Support: true,
     id: 'comment_layout_hide_sub',
     version: 1,
     parent: layout.layout,
@@ -11925,6 +12529,59 @@ header[content_auth="5"] ~ * { display: none !important; }
               childComment.parentNode.style.display = 'block';
             });
           });
+        });
+      });
+
+      // V7 best-effort: collapse nested replies under each root comment.
+      observer.dom.add(function hideV7SubComment() {
+        if (!document.querySelector('#app')) return;
+
+        const normalize = text => String(text || '').replace(/[\u200b\r\n]+/g, ' ').replace(/[ \t]+/g, ' ').trim();
+        const rootCandidates = Array.from(document.querySelectorAll([
+          // V7 comment root items (best-effort)
+          '.wbpro-list .item1',
+          '.wbpro-list > div',
+        ].join(','))).slice(0, 600);
+
+	        rootCandidates.forEach(root => {
+	          if (!(root instanceof Element)) return;
+	          if (root.hasAttribute('yawf-v7-sub-folded')) return;
+	          // Only handle comment-like items (avoid impacting feed list items).
+	          if (!root.querySelector('.text')) return;
+	          if (!root.querySelector('.info')) return;
+
+	          // Find a nested container that looks like child comment area
+	          const child = root.querySelector('.list2, [class*="list2"], [class*="child"], [class*="sub"]');
+	          if (!(child instanceof Element)) return;
+          // Skip if empty
+          const childText = normalize(child.textContent);
+          const hasChildItems = !!child.querySelector('[comment_id],[data-commentid],a[href*=\"/comment\"],.wbpro-list');
+          if (!childText && !hasChildItems) return;
+
+          // Find a safe anchor for inserting toggle: use the timestamp line if present
+          const infoLine = root.querySelector('.info') || root.querySelector('[class*=\"info\"]') || null;
+          const host = infoLine && infoLine.parentElement ? infoLine : root;
+          if (!(host instanceof Element)) return;
+
+          root.setAttribute('yawf-v7-sub-folded', '');
+
+          // Hide child container initially
+          child.style.setProperty('display', 'none', 'important');
+
+          // Avoid duplicate toggle
+          if (root.querySelector('.yawf-v7-sub-toggle')) return;
+
+          const btn = document.createElement('a');
+          btn.href = 'javascript:void(0);';
+          btn.className = 'yawf-v7-sub-toggle';
+          btn.style.cssText = 'margin-left: 10px; font-weight: 600;';
+          btn.textContent = '展开回复';
+          btn.addEventListener('click', () => {
+            const hidden = getComputedStyle(child).display === 'none';
+            child.style.setProperty('display', hidden ? 'block' : 'none', 'important');
+            btn.textContent = hidden ? '收起回复' : '展开回复';
+          });
+          host.appendChild(btn);
         });
       });
     },
@@ -12137,15 +12794,38 @@ header[content_auth="5"] ~ * { display: none !important; }
   };
 
   more.showMyComment = rule.Rule({
+    v7Support: true,
     id: 'filter_comment_show_my',
     version: 1,
     parent: more.more,
     template: () => i18n.showMyComment,
     init() {
       const rule = this;
+      const applyV7 = function applyV7ShowMyComment() {
+        if (!rule.isEnabled()) return;
+        if (!isV7CommentDom()) return;
+        const username = init.page.config.user.screen_name;
+        if (!username) return;
+        getV7CommentItems().forEach(item => {
+          const author = (item.querySelector('.text a')?.textContent || '').replace(/[\u200b\r\n]+/g, ' ').replace(/[ \t]+/g, ' ').trim();
+          if (!author) return;
+          if (author !== username) return;
+          // Remove all V7 hide markers so "always show my comments" wins.
+          v7CommentHiddenAttrs.forEach(attr => item.removeAttribute(attr));
+          v7ApplyCommentHiddenStyle(item);
+        });
+      };
+
+      // Delay DOM-based V7 override so it runs after other V7 comment hiding rules.
+      init.onLoad(() => {
+        observer.dom.add(applyV7);
+        applyV7();
+      }, { priority: util.priority.AFTER });
+      this.addConfigListener(applyV7);
+
       observer.comment.filter(function showMyComment(comment) {
         if (!rule.isEnabled()) return null;
-        const author = commentParser.user.name(comment)[0];
+        const author = typeof commentParser.user?.name === 'function' ? commentParser.user.name(comment)[0] : null;
         const username = init.page.config.user.screen_name;
         if (author === username) return 'shomme';
         return null;
@@ -12160,7 +12840,83 @@ header[content_auth="5"] ~ * { display: none !important; }
     en: 'Hide comments | with more than {{count}} image emoji',
   };
 
+  // V7 comment DOM is highly dynamic; use a stable content marker instead of `#app[data-v-app]`.
+  const isV7CommentDom = () => !!document.querySelector('.wbpro-list');
+  const v7CommentHiddenAttrs = [
+    'yawf-v7-hide-comment-face-count',
+    'yawf-v7-hide-comment-face-type',
+    'yawf-v7-hide-comment-wo-content',
+    'yawf-v7-hide-comment-with-forward',
+  ];
+  const getV7CommentItems = () => {
+    const items = [];
+    const lists = Array.from(document.querySelectorAll('.wbpro-list'));
+    lists.forEach(list => {
+      if (!(list instanceof Element)) return;
+      Array.from(list.children).forEach(child => {
+        if (!(child instanceof Element)) return;
+        // Comment item should contain text + info blocks.
+        if (!child.querySelector('.text')) return;
+        if (!child.querySelector('.info')) return;
+        items.push(child);
+      });
+    });
+    return [...new Set(items)];
+  };
+  const v7ApplyCommentHiddenStyle = (item) => {
+    if (!(item instanceof Element)) return;
+    const shouldHide = v7CommentHiddenAttrs.some(a => item.hasAttribute(a));
+    if (shouldHide) {
+      if (!item.hasAttribute('yawf-v7-comment-hidden')) {
+        item.setAttribute('yawf-v7-comment-hidden', '');
+        item.dataset.yawfPrevDisplay = item.style.display || '';
+      }
+      item.style.setProperty('display', 'none', 'important');
+    } else if (item.hasAttribute('yawf-v7-comment-hidden')) {
+      item.removeAttribute('yawf-v7-comment-hidden');
+      const prev = item.dataset.yawfPrevDisplay || '';
+      item.style.display = prev;
+      delete item.dataset.yawfPrevDisplay;
+      item.style.removeProperty('display');
+    }
+  };
+  const v7GetEmojiAltListFromItem = (item) => {
+    // Prefer the actual content span after the ":" (see user-provided DOM)
+    const textSpan = item.querySelector('.text span') || item.querySelector('.text') || item;
+    const imgs = Array.from(textSpan.querySelectorAll('img[alt],img[title]'));
+    const alts = imgs.map(img => {
+      const alt = (img.getAttribute('alt') || img.getAttribute('title') || '').trim();
+      return alt;
+    }).filter(Boolean).filter(alt => /^\[[^\]\r\n]{1,12}\]$/.test(alt));
+    return alts;
+  };
+  const v7GetCleanedTextFromItem = (item) => {
+    const textSpan = item.querySelector('.text span') || item.querySelector('.text') || null;
+    if (!textSpan) return '';
+    const clone = textSpan.cloneNode(true);
+    // Remove emoji images
+    Array.from(clone.querySelectorAll('img')).forEach(n => n.remove());
+    // Remove mentions/links (treated as not content for this rule)
+    Array.from(clone.querySelectorAll('a')).forEach(n => n.remove());
+    const raw = (clone.textContent || '').trim();
+    return raw.replace(/回[复復覆]|Reply|微博|[转轉][发發]|[:/\s：.\u200b]/ig, '').trim();
+  };
+  const v7CommentHasImage = (item) => {
+    // Only treat "real pictures" as images; ignore avatars and emoji.
+    const scope = item.querySelector('.text span') || item.querySelector('.text') || item;
+    if (scope.querySelector('.woo-picture-main, .woo-picture-hoverMask')) return true;
+    const imgs = Array.from(scope.querySelectorAll('img[src]'));
+    return imgs.some(img => {
+      if (!(img instanceof HTMLImageElement)) return false;
+      if (img.closest('.woo-avatar-main')) return false;
+      const alt = (img.getAttribute('alt') || '').trim();
+      if (/^\[[^\]\r\n]{1,12}\]$/.test(alt)) return false; // emoji
+      return true;
+    });
+  };
+
   more.commentFaceCount = rule.Rule({
+    v7Support: true,
     id: 'filter_comment_face_count',
     version: 1,
     parent: more.more,
@@ -12175,10 +12931,25 @@ header[content_auth="5"] ~ * { display: none !important; }
     },
     init() {
       const rule = this;
+      const applyV7 = function applyV7CommentFaceCount() {
+        if (!isV7CommentDom()) return;
+        const limit = rule.ref.count.getConfig();
+        getV7CommentItems().forEach(item => {
+          const alts = v7GetEmojiAltListFromItem(item);
+          if (rule.isEnabled() && alts.length > limit) item.setAttribute('yawf-v7-hide-comment-face-count', '');
+          else item.removeAttribute('yawf-v7-hide-comment-face-count');
+          v7ApplyCommentHiddenStyle(item);
+        });
+      };
+      observer.dom.add(applyV7);
+      rule.addConfigListener(applyV7);
+      rule.ref.count.addConfigListener(applyV7);
+      applyV7();
+
       observer.comment.filter(function commentFaceCount(comment) {
         if (!rule.isEnabled()) return null;
         const face = comment.querySelectorAll('img[type="face"][alt]');
-        if (face > rule.ref.count.getConfig()) return 'hide';
+        if (face.length > rule.ref.count.getConfig()) return 'hide';
         return null;
       });
       this.addConfigListener(() => { observer.comment.rerun(); });
@@ -12192,6 +12963,7 @@ header[content_auth="5"] ~ * { display: none !important; }
   };
 
   more.commentFaceTypes = rule.Rule({
+    v7Support: true,
     id: 'filter_comment_face_type',
     version: 1,
     parent: more.more,
@@ -12206,6 +12978,22 @@ header[content_auth="5"] ~ * { display: none !important; }
     },
     init() {
       const rule = this;
+      const applyV7 = function applyV7CommentFaceTypes() {
+        if (!isV7CommentDom()) return;
+        const limit = rule.ref.count.getConfig();
+        getV7CommentItems().forEach(item => {
+          const alts = v7GetEmojiAltListFromItem(item);
+          const types = new Set(alts).size;
+          if (rule.isEnabled() && types > limit) item.setAttribute('yawf-v7-hide-comment-face-type', '');
+          else item.removeAttribute('yawf-v7-hide-comment-face-type');
+          v7ApplyCommentHiddenStyle(item);
+        });
+      };
+      observer.dom.add(applyV7);
+      rule.addConfigListener(applyV7);
+      rule.ref.count.addConfigListener(applyV7);
+      applyV7();
+
       observer.comment.filter(function commentFaceTypes(comment) {
         if (!rule.isEnabled()) return null;
         const face = comment.querySelectorAll('img[type="face"][alt]');
@@ -12224,16 +13012,33 @@ header[content_auth="5"] ~ * { display: none !important; }
   };
 
   more.commentWithoutContent = rule.Rule({
+    v7Support: true,
     id: 'filter_comment_wo_content',
     version: 1,
     parent: more.more,
     template: () => i18n.commentWithoutContent,
     init() {
       const rule = this;
+      const applyV7 = function applyV7CommentWithoutContent() {
+        if (!isV7CommentDom()) return;
+        getV7CommentItems().forEach(item => {
+          const noText = v7GetCleanedTextFromItem(item).length === 0;
+          const hasImg = v7CommentHasImage(item);
+          if (rule.isEnabled() && noText && !hasImg) item.setAttribute('yawf-v7-hide-comment-wo-content', '');
+          else item.removeAttribute('yawf-v7-hide-comment-wo-content');
+          v7ApplyCommentHiddenStyle(item);
+        });
+      };
+      observer.dom.add(applyV7);
+      rule.addConfigListener(applyV7);
+      applyV7();
+
       observer.comment.filter(function commentWithoutContent(comment) {
         if (!rule.isEnabled()) return null;
         if (comment.querySelector('.media_box .WB_pic')) return null; // 有图片的不算没内容
-        const texts = Array.from(comment.querySelector('.WB_text').childNodes)
+        const wbText = comment.querySelector('.WB_text');
+        if (!wbText) return null;
+        const texts = Array.from(wbText.childNodes)
           .filter(n => !((n instanceof Element) && n.matches('a[usercard]'))) // 提到人不算内容
           .map(n => n.textContent).join('')
           .replace(/回[复復覆]|Reply|微博|[转轉][发發]|[:/\s：.\u200b]/ig, ''); // 空格、“回复”和冒号不算内容
@@ -12263,15 +13068,39 @@ header[content_auth="5"] ~ * { display: none !important; }
   };
 
   more.commentWithForward = rule.Rule({
+    v7Support: true,
     id: 'filter_comment_with_forward',
     version: 1,
     parent: more.more,
     template: () => i18n.commentWithForward,
     init() {
       const rule = this;
+      const applyV7 = function applyV7CommentWithForward() {
+        if (!isV7CommentDom()) return;
+        const normalize = text => String(text || '').replace(/[\u200b\r\n]+/g, ' ').replace(/[ \t]+/g, ' ').trim();
+        const containsForward = item => {
+          const span = item.querySelector('.text span') || item.querySelector('.text') || item;
+          let t = normalize(span.textContent);
+          if (!t) return false;
+          // Ignore URLs (http:// etc) which contain '//' but are not forwards.
+          t = t.replace(/https?:\/\/\S+/ig, '');
+          // Typical forward marker in comments: "//@xxx:" or "// @xxx:"
+          return /(^|[\s:：])\/\/\s*@/i.test(t) || /(^|[\s:：])\/\/@/i.test(t);
+        };
+
+        getV7CommentItems().forEach(item => {
+          if (rule.isEnabled() && containsForward(item)) item.setAttribute('yawf-v7-hide-comment-with-forward', '');
+          else item.removeAttribute('yawf-v7-hide-comment-with-forward');
+          v7ApplyCommentHiddenStyle(item);
+        });
+      };
+      observer.dom.add(applyV7);
+      rule.addConfigListener(applyV7);
+      applyV7();
+
       observer.comment.filter(function commentWithForward(comment) {
         if (!rule.isEnabled()) return null;
-        const users = commentParser.user.dom(comment);
+        const users = typeof commentParser.user?.dom === 'function' ? commentParser.user.dom(comment) : [];
         const forwards = users.find(u => u.previousSibling.textContent.match(/\/\/$/));
         if (forwards) return 'hide';
         return null;
@@ -12438,7 +13267,17 @@ header[content_auth="5"] ~ * { display: none !important; }
   });
 
   clean.CleanGroup('icons', () => i18n.cleanIconsGroupTitle);
-  clean.CleanRule('level', () => i18n.cleanIconsLevel, 1, '.icon_bed[node-type="level"], .W_level_ico, .W_icon_level { display: none !important; }');
+  clean.CleanRule('level', () => i18n.cleanIconsLevel, 1, {
+    v7Support: true,
+    acss: `
+.icon_bed[node-type="level"], .W_level_ico, .W_icon_level,
+.woo-icon-wrap[aria-label^="lv"],
+.woo-icon-wrap[aria-label^="Lv"],
+.woo-icon-wrap[aria-label^="LV"],
+.woo-icon-wrap[aria-label^="level"],
+.woo-icon-wrap[aria-label*="等级"] { display: none !important; }
+`,
+  });
   const member = clean.CleanRule('member', () => i18n.cleanIconsMember, 1, '', {
     v7Support: true,
     acss: `
@@ -12451,15 +13290,66 @@ img[src*="vvip_"] { display: none !important; }
   });
   const approve = clean.CleanRule('approve', () => i18n.cleanIconsApprove, 1, '', { v7Support: true });
   const approveCo = clean.CleanRule('approve_co', () => i18n.cleanIconsApproveCo, 1, '', { v7Support: true });
-  clean.CleanRule('approve_dead', () => i18n.cleanIconsApproveDead, 1, '.icon_approve_dead, .icon_pf_approve_dead { display: none !important; }');
+  clean.CleanRule('approve_dead', () => i18n.cleanIconsApproveDead, 1, {
+    v7Support: true,
+    acss: `
+.icon_approve_dead, .icon_pf_approve_dead,
+.woo-icon-wrap[aria-label*="dead" i],
+.woo-icon-wrap[aria-label*="expired" i],
+.woo-icon-wrap[aria-label*="invalid" i],
+img[src*="approve_dead" i],
+img[src*="vdead" i] { display: none !important; }
+`,
+  });
   const bigFan = clean.CleanRule('bigfun', () => i18n.cleanIconsBigFun, 26, '', { v7Support: true });
   const club = clean.CleanRule('club', () => i18n.cleanIconsClub, 1, '', { v7Support: true });
   const vGirl = clean.CleanRule('v_girl', () => i18n.cleanIconsVGirl, 1, '', { v7Support: true });
-  clean.CleanRule('supervisor', () => i18n.cleanIconsSupervisor, 1, '.icon_supervisor { display: none !important; }');
-  clean.CleanRule('taobao', () => i18n.cleanIconsTaobao, 1, '.ico_taobao, .icon_tmall, .icon_taobao, .icon_tmall { display: none !important; }');
-  clean.CleanRule('cheng', () => i18n.cleanIconsCheng, 1, '.icon_cheng { display: none !important; }');
-  clean.CleanRule('gongyi', () => i18n.cleanIconsGongyi, 1, '.ico_gongyi, .ico_gongyi1, .ico_gongyi2, .ico_gongyi3, .ico_gongyi4, .ico_gongyi5, .icon_gongyi, .icon_gongyi2, .icon_gongyi3, .icon_gongyi4, .icon_gongyi5 { display: none !important; }');
-  clean.CleanRule('zongyika', () => i18n.cleanIconsZongyika, 1, '.zongyika2014, .icon_zongyika2014 { display: none !important; }');
+  clean.CleanRule('supervisor', () => i18n.cleanIconsSupervisor, 1, {
+    v7Support: true,
+    acss: `
+.icon_supervisor,
+.woo-icon-wrap[aria-label*="supervisor" i],
+img[src*="supervisor" i] { display: none !important; }
+`,
+  });
+  clean.CleanRule('taobao', () => i18n.cleanIconsTaobao, 1, {
+    v7Support: true,
+    acss: `
+.ico_taobao, .icon_tmall, .icon_taobao, .icon_tmall,
+.woo-icon-wrap[aria-label*="taobao" i],
+.woo-icon-wrap[aria-label*="tmall" i],
+img[src*="taobao" i],
+img[src*="tmall" i] { display: none !important; }
+`,
+  });
+  clean.CleanRule('cheng', () => i18n.cleanIconsCheng, 1, {
+    v7Support: true,
+    acss: `
+.icon_cheng,
+.woo-icon-wrap[aria-label*="cheng" i],
+img[src*="cheng" i] { display: none !important; }
+`,
+  });
+  clean.CleanRule('gongyi', () => i18n.cleanIconsGongyi, 1, {
+    v7Support: true,
+    acss: `
+.ico_gongyi, .ico_gongyi1, .ico_gongyi2, .ico_gongyi3, .ico_gongyi4, .ico_gongyi5,
+.icon_gongyi, .icon_gongyi2, .icon_gongyi3, .icon_gongyi4, .icon_gongyi5,
+.woo-icon-wrap[aria-label*="gongyi" i],
+img[src*="gongyi" i] { display: none !important; }
+`,
+  });
+  clean.CleanRule('zongyika', () => i18n.cleanIconsZongyika, 1, {
+    v7Support: true,
+    acss: `
+.zongyika2014, .icon_zongyika2014,
+.woo-icon-wrap[aria-label*="zongyika" i],
+.woo-icon-wrap[aria-label*="zongyi" i],
+.woo-icon-wrap[aria-label*="variety" i],
+img[src*="zongyika" i],
+img[src*="zongyi" i] { display: none !important; }
+`,
+  });
   clean.CleanRule('others', () => i18n.cleanIconsOthers, 1, () => {
     observer.dom.add(function () {
       const icons = Array.from(document.querySelectorAll('a > .W_icon_yystyle'));
@@ -12470,8 +13360,13 @@ img[src*="vvip_"] { display: none !important; }
         link.parentNode.replaceChild(replacement, link);
       });
     });
-    css.append('.W_icon_yystyle, .W_icon_yy { display: none !important; }');
-  });
+    css.append(`
+.W_icon_yystyle, .W_icon_yy,
+.woo-icon-wrap[aria-label*="pai" i],
+.woo-icon-wrap[aria-label*="youji" i],
+.woo-icon-wrap[aria-label*="travel" i] { display: none !important; }
+`);
+  }, { v7Support: true });
 
   clean.CleanRuleGroup({
     'vyellow,vgold': approve,
@@ -12551,12 +13446,13 @@ img[src*="vvip_"] { display: none !important; }
 
 ; (function () {
 
-  const yawf = window.yawf;
-  const util = yawf.util;
+	  const yawf = window.yawf;
+	  const util = yawf.util;
+	  const observer = yawf.observer;
 
-  const clean = yawf.rules.clean;
+	  const clean = yawf.rules.clean;
 
-  const i18n = util.i18n;
+	  const i18n = util.i18n;
 
   Object.assign(i18n, {
     cleanFollowGroupTitle: { cn: '隐藏模块 - 关注按钮', tw: '隱藏模組 - 關注按鈕', en: 'Hide Modules - Follow Button' },
@@ -12568,15 +13464,143 @@ img[src*="vvip_"] { display: none !important; }
     cleanFollowRecommend: { cn: '关注推荐', tw: '關注推薦', en: 'Follow Recommend' },
   });
 
-  clean.CleanGroup('follow', () => i18n.cleanFollowGroupTitle);
-  clean.CleanRule('single', () => i18n.cleanFollowSingle, 1, '[id^="Pl_Official_WeiboDetail__"] [node-type*="feed_recommend_follow"] { display: none !important; }');
-  clean.CleanRule('at_me', () => i18n.cleanFollowAtMe, 1, '#v6_pl_content_atmeweibo [node-type*="feed_recommend_follow"] { display: none !important; }');
-  clean.CleanRule('discover', () => i18n.cleanFollowDiscover, 1, '#plc_discover [node-type*="feed_recommend_follow"] { display: none !important; }');
-  clean.CleanRule('fast_forward', () => i18n.cleanFollowFastForward, 1, '#v6_pl_content_homefeed [node-type*="feed_recommend_follow"] { display: none !important; }');
-  clean.CleanRule('video', () => i18n.cleanFollowVideo, 1, '.WB_h5video .con-11, .wbv-add-box { display: none !important; }');
-  clean.CleanRule('recommend', () => i18n.cleanFollowRecommend, 1, [
-    '[action-type="follow_recommend_arr"]',
-    '[node-type="follow_recommend_box"]',
+	  const normalizeText = function (text) {
+	    return String(text || '').replace(/[\u200b\r\n]+/g, ' ').replace(/[ \t]+/g, ' ').trim();
+	  };
+
+	  const hideV7FollowRecommendBlocks = function (markAttr) {
+	    // V7 only
+	    if (!document.querySelector('#app')) return;
+
+	    const titlePatterns = [
+	      /你可能感兴趣的人/,
+	      /你可能感興趣的人/,
+	      /关注推荐/,
+	      /關注推薦/,
+	      /推荐关注/,
+	      /推薦關注/,
+	      /可能感兴趣的人/,
+	      /可能感興趣的人/,
+	    ];
+
+	    const isFollowButton = function (el) {
+	      if (!(el instanceof Element)) return false;
+	      if (!(el.matches('button,[role="button"],a,[role="menuitem"]'))) return false;
+	      const t = normalizeText(el.textContent);
+	      return t === '关注' || t === '已关注' || t === '相互关注' || t === '互相关注' || t === '取消关注' ||
+	        t === '關注' || t === '已關注' || t === '相互關注' || t === '取消關注';
+	    };
+
+	    // Legacy marker (V6-ish) - keep as a no-op fallback on V7 if attributes are still present.
+	    Array.from(document.querySelectorAll('[node-type*="feed_recommend_follow"],[action-type*="feed_recommend_follow"]'))
+	      .forEach(el => {
+	        if (!(el instanceof Element)) return;
+	        if (el.hasAttribute(markAttr)) return;
+	        const box = el.closest('article,.woo-panel-main,.wbpro-side,.woo-box-flex') || el;
+	        box.setAttribute(markAttr, '');
+	        box.style.setProperty('display', 'none', 'important');
+	      });
+
+	    // V7: "people you may be interested in" style modules (panel with follow buttons)
+	    const panels = Array.from(document.querySelectorAll([
+	      'main .woo-panel-main',
+	      'main .wbpro-side',
+	      '#__sidebar .woo-panel-main',
+	      '#__sidebar .wbpro-side',
+	      '.woo-modal-main .woo-panel-main',
+	      '.woo-modal-main .wbpro-side',
+	    ].join(',')));
+
+	    panels.forEach(panel => {
+	      if (!(panel instanceof Element)) return;
+	      if (panel.hasAttribute(markAttr)) return;
+
+	      const titleEl = panel.querySelector('.wbpro-side-tit, header, h2, h3, .woo-box-item-flex');
+	      const title = normalizeText(titleEl ? titleEl.textContent : '');
+	      if (!title) return;
+	      if (!titlePatterns.some(re => re.test(title))) return;
+
+	      const buttons = Array.from(panel.querySelectorAll('button,[role="button"],a'));
+	      if (!buttons.some(isFollowButton)) return;
+
+	      panel.setAttribute(markAttr, '');
+	      panel.style.setProperty('display', 'none', 'important');
+	    });
+	  };
+
+	  clean.CleanGroup('follow', () => i18n.cleanFollowGroupTitle);
+	  clean.CleanRule('single', () => i18n.cleanFollowSingle, 1, {
+	    v7Support: true,
+	    acss: '[id^="Pl_Official_WeiboDetail__"] [node-type*="feed_recommend_follow"] { display: none !important; }',
+	    ainit() {
+	      const rule = this;
+	      observer.dom.add(function hideFollowSingleV7() {
+	        if (!rule.isEnabled()) return;
+	        hideV7FollowRecommendBlocks('yawf-hide-follow-single');
+	      });
+	    },
+	  });
+	  clean.CleanRule('at_me', () => i18n.cleanFollowAtMe, 1, {
+	    v7Support: true,
+	    acss: '#v6_pl_content_atmeweibo [node-type*="feed_recommend_follow"] { display: none !important; }',
+	    ainit() {
+	      const rule = this;
+	      observer.dom.add(function hideFollowAtMeV7() {
+	        if (!rule.isEnabled()) return;
+	        hideV7FollowRecommendBlocks('yawf-hide-follow-at-me');
+	      });
+	    },
+	  });
+	  clean.CleanRule('discover', () => i18n.cleanFollowDiscover, 1, {
+	    v7Support: true,
+	    acss: '#plc_discover [node-type*="feed_recommend_follow"] { display: none !important; }',
+	    ainit() {
+	      observer.dom.add(function hideFollowDiscoverV7() {
+	        // Best-effort: only apply on V7 "Hot/Discover" pages to avoid impacting other pages.
+	        const path = location.pathname || '';
+	        const isDiscover = /(^|\/)(hot|discover)(\/|$)/i.test(path);
+	        if (!isDiscover) return;
+
+	        const root = document.querySelector('main,[role="main"]') || document.body;
+	        const blocks = Array.from(root.querySelectorAll('[node-type*="feed_recommend_follow"]'));
+	        if (!blocks.length) return;
+	        blocks.forEach(el => {
+	          if (!(el instanceof Element)) return;
+	          el.style.setProperty('display', 'none', 'important');
+	        });
+	      });
+	    },
+	  });
+	  clean.CleanRule('fast_forward', () => i18n.cleanFollowFastForward, 1, {
+	    v7Support: true,
+	    acss: '#v6_pl_content_homefeed [node-type*="feed_recommend_follow"] { display: none !important; }',
+	    ainit() {
+	      const rule = this;
+	      observer.dom.add(function hideFollowFastForwardV7() {
+	        if (!rule.isEnabled()) return;
+	        hideV7FollowRecommendBlocks('yawf-hide-follow-fast-forward');
+	      });
+	    },
+	  });
+	  clean.CleanRule('video', () => i18n.cleanFollowVideo, 1, {
+	    v7Support: true,
+	    acss: '.WB_h5video .con-11, .wbv-add-box { display: none !important; }',
+	    ainit() {
+	      const rule = this;
+	      observer.dom.add(function hideFollowVideoV7() {
+	        if (!rule.isEnabled()) return;
+	        hideV7FollowRecommendBlocks('yawf-hide-follow-video');
+	        // Extra: some video follow prompts are pure DOM blocks
+	        Array.from(document.querySelectorAll('.wbv-add-box,.WB_h5video .con-11')).forEach(el => {
+	          if (!(el instanceof Element)) return;
+	          el.style.setProperty('display', 'none', 'important');
+	        });
+	      });
+	    },
+	  });
+	  clean.CleanRule('recommend', () => i18n.cleanFollowRecommend, 1, [
+	    '[action-type="follow_recommend_arr"]',
+	    '[node-type="follow_recommend_box"]',
     // V7: profile follow recommendations sidebar module
     '[page="profileRecom"]',
   ].join(',') + ' { display: none !important; }', { v7Support: true });
@@ -12678,6 +13702,7 @@ img[src*="vvip_"] { display: none !important; }
 	  });
   if (env.config.requestBlockingSupported) {
     clean.CleanRule('hot_search', () => i18n.cleanNavHotSearch, 1, {
+      v7Support: true,
       init: function () {
         backend.onRequest('hotSearch', details => {
           if (this.isEnabled()) return { cancel: true };
@@ -12699,6 +13724,7 @@ img[src*="vvip_"] { display: none !important; }
     return supported;
   }()) {
     clean.CleanRule('hot_search', () => i18n.cleanNavHotSearch, 1, {
+      v7Support: true,
       ainit: function () {
         document.documentElement.addEventListener('DOMNodeInserted', event => {
           const script = event.target;
@@ -12715,7 +13741,42 @@ img[src*="vvip_"] { display: none !important; }
     });
   }
   clean.CleanRule('aria', () => i18n.cleanNavAria, 98, '[yawf-component-tag~="aria"] { display: none !important; }', { v7Support: true });
-  clean.CleanRule('notice_new', () => i18n.cleanNavNoticeNew, 1, '.WB_global_nav .gn_set_list .W_new_count { display: none !important; }');
+  clean.CleanRule('notice_new', () => i18n.cleanNavNoticeNew, 1, {
+    v7Support: true,
+    acss: '.WB_global_nav .gn_set_list .W_new_count { display: none !important; }',
+    ainit() {
+      const rule = this;
+      observer.dom.add(function hideV7NavNoticeCount() {
+        if (!rule.isEnabled()) return;
+        if (!document.querySelector('#app')) return;
+
+        const nav = document.querySelector('nav') || document.querySelector('[role="navigation"]');
+        if (!nav) return;
+
+        // Best-effort: hide small numeric badges (unread count) in the top navigation.
+        const candidates = Array.from(nav.querySelectorAll('span,div,em,i,sup')).slice(0, 400);
+        candidates.forEach(el => {
+          if (!(el instanceof Element)) return;
+          if (el.hasAttribute('yawf-hide-nav-notice-new')) return;
+          const text = (el.textContent || '').trim();
+          if (!/^\d{1,3}$/.test(text)) return;
+          // Avoid hiding menu text like "2026" from titles etc.
+          if (text.length >= 4) return;
+
+          const r = el.getBoundingClientRect();
+          if (r.height <= 0 || r.width <= 0) return;
+          if (r.height > 26 || r.width > 34) return;
+          if (r.top > 160) return;
+
+          // Only hide badges inside navigation links/buttons.
+          if (!el.closest('a,button,[role="button"]')) return;
+
+          el.setAttribute('yawf-hide-nav-notice-new', '');
+          el.style.setProperty('display', 'none', 'important');
+        });
+      });
+    },
+  });
   clean.CleanRule('new', () => i18n.cleanNavNew, 1, '', {
     v7Support: true,
     ainit: function () {
@@ -12739,12 +13800,13 @@ img[src*="vvip_"] { display: none !important; }
 //#region @require yaofang://content/rule/clean/left.js
 ; (function () {
 
-  const yawf = window.yawf;
-  const util = yawf.util;
+	  const yawf = window.yawf;
+	  const util = yawf.util;
+	  const observer = yawf.observer;
 
-  const i18n = util.i18n;
+	  const i18n = util.i18n;
 
-  const clean = yawf.rules.clean;
+	  const clean = yawf.rules.clean;
 
   Object.assign(i18n, {
     cleanLeftGroupTitle: { cn: '隐藏模块 - 左栏', tw: '隱藏模組 - 左欄', en: 'Hide modules - Left Column' },
@@ -12765,7 +13827,17 @@ img[src*="vvip_"] { display: none !important; }
   });
 
   clean.CleanGroup('left', () => i18n.cleanLeftGroupTitle);
-  clean.CleanRule('level', () => i18n.cleanIconsLevel, 1, '.icon_bed[node-type="level"], .W_level_ico, .W_icon_level { display: none !important; }');
+  clean.CleanRule('level', () => i18n.cleanIconsLevel, 1, {
+    v7Support: true,
+    acss: `
+.icon_bed[node-type="level"], .W_level_ico, .W_icon_level,
+.woo-icon-wrap[aria-label^="lv"],
+.woo-icon-wrap[aria-label^="Lv"],
+.woo-icon-wrap[aria-label^="LV"],
+.woo-icon-wrap[aria-label^="level"],
+.woo-icon-wrap[aria-label*="等级"] { display: none !important; }
+`,
+  });
   const new_feed = clean.CleanRule('new_feed', () => i18n.cleanLeftNewFeed, 21, '', { v7Support: true });
   const friends = clean.CleanRule('friends', () => i18n.cleanLeftFriends, 1, '', { v7Support: true });
   const special = clean.CleanRule('special', () => i18n.cleanLeftSpecial, 1, '', { v7Support: true });
@@ -12838,13 +13910,40 @@ img[src*="vvip_"] { display: none !important; }
     cleanMiddleMemberTip: { cn: '开通会员提示（底部）', tw: '開通會員提示（底部）', en: 'Tip of Joining Weibo VIP, bottom' },
   });
 
-  clean.CleanGroup('middle', () => i18n.cleanMiddleGroupTitle);
-  clean.CleanRule('recommended_topic', () => i18n.cleanMiddleRecommendedTopic, 1, '#v6_pl_content_publishertop div[node-type="recommendTopic"] { display: none !important; }');
-  clean.CleanRule('feed_recommend', () => i18n.cleanMiddleFeedRecommend, 1, {
-    v7Support: true,
-    acss: 'a.notes[node-type="feed_list_newBar"][href^="http"]:not([action-type="feed_list_newBar"]), .WB_feed_newuser[node-type="recommfeed"] { display: none !important; }',
-    ainit() {
-      if (!document.getElementById('homeWrap')) return;
+	  clean.CleanGroup('middle', () => i18n.cleanMiddleGroupTitle);
+	  clean.CleanRule('recommended_topic', () => i18n.cleanMiddleRecommendedTopic, 1, {
+	    v7Support: true,
+	    acss: '#v6_pl_content_publishertop div[node-type="recommendTopic"] { display: none !important; }',
+	    ainit() {
+	      observer.dom.add(function hideRecommendedTopicV7() {
+	        if (!document.getElementById('homeWrap')) return;
+	        const main = document.querySelector('#homeWrap main,[role="main"]') || document.querySelector('main,[role="main"]');
+	        if (!main) return;
+
+	        // Only consider nodes above the first feed card to avoid touching actual feeds.
+	        const firstArticle = main.querySelector('article');
+	        let node = main.firstElementChild;
+	        while (node && node !== firstArticle) {
+	          const el = node;
+	          node = node.nextElementSibling;
+	          if (!(el instanceof Element)) continue;
+	          if (el.hasAttribute('yawf-middle-recommended-topic')) continue;
+	          const text = (el.textContent || '').replace(/[\u200b\r\n]+/g, ' ').replace(/[ \t]+/g, ' ').trim();
+	          if (!text) continue;
+	          if (!(text.includes('热门微博') || text.includes('热门话题') || text.includes('推荐话题'))) continue;
+	          // Avoid hiding the composer itself.
+	          if (text.includes('有什么新鲜事') || text.includes('想分享给大家')) continue;
+	          el.setAttribute('yawf-middle-recommended-topic', '');
+	          el.style.setProperty('display', 'none', 'important');
+	        }
+	      });
+	    },
+	  });
+	  clean.CleanRule('feed_recommend', () => i18n.cleanMiddleFeedRecommend, 1, {
+	    v7Support: true,
+	    acss: 'a.notes[node-type="feed_list_newBar"][href^="http"]:not([action-type="feed_list_newBar"]), .WB_feed_newuser[node-type="recommfeed"] { display: none !important; }',
+	    ainit() {
+	      if (!document.getElementById('homeWrap')) return;
       util.inject(function (rootKey) {
         const yawf = window[rootKey];
         const vueSetup = yawf && yawf.vueSetup;
@@ -12880,9 +13979,12 @@ img[src*="vvip_"] { display: none !important; }
           if (!vm.$options.beforeUpdate.includes(hook)) vm.$options.beforeUpdate.push(hook);
         });
       }, util.inject.rootKey);
-    },
-  });
-  clean.CleanRule('member_tip', () => i18n.cleanMiddleMemberTip, 1, '[node-type="feed_list_shieldKeyword"] { display: none !important; }');
+	    },
+	  });
+	  clean.CleanRule('member_tip', () => i18n.cleanMiddleMemberTip, 1, {
+	    v7Support: true,
+	    acss: '[node-type="feed_list_shieldKeyword"] { display: none !important; }',
+	  });
 
 }());
 //#endregion
@@ -12896,6 +13998,10 @@ img[src*="vvip_"] { display: none !important; }
   const i18n = util.i18n;
 
   const clean = yawf.rules.clean;
+
+  const normalizeText = function (text) {
+    return String(text || '').replace(/[\u200b\r\n]+/g, ' ').replace(/[ \t]+/g, ' ').trim();
+  };
 
   Object.assign(i18n, {
     cleanRightGroupTitle: { cn: '隐藏模块 - 右栏', tw: '隱藏模組 - 右欄', en: 'Hide modules - Right Column' },
@@ -12923,15 +14029,94 @@ img[src*="vvip_"] { display: none !important; }
   const hotSearch = clean.CleanRule('hot_topic', () => i18n.cleanRightHotTopic, 1, '', { v7Support: true });
   const interested = clean.CleanRule('interest', () => i18n.cleanRightInterest, 1, '', { v7Support: true });
   const service = clean.CleanRule('service', () => i18n.cleanRightService, 104, '', { v7Support: true });
-  clean.CleanRule('member', () => i18n.cleanRightMember, 1, '#v6_trustPagelet_recom_member { display: none !important; }');
+  const member = clean.CleanRule('member', () => i18n.cleanRightMember, 1, {
+    v7Support: true,
+    acss: '#v6_trustPagelet_recom_member { display: none !important; }',
+  });
   clean.CleanRule('groups', () => i18n.cleanRightGroups, 1, '#v6_pl_rightmod_groups { display: none; }');
-  clean.CleanRule('recom_group_user', () => i18n.cleanRightRecomGroupUser, 1, '#v6_pl_rightmod_recomgroupuser { display: none; }');
-  clean.CleanRule('hongbao_rank', () => i18n.cleanRightHongbaoRank, 1, '#v6_pl_rightmod_hongbao { display: none !important; }');
-  clean.CleanRule('att_feed', () => i18n.cleanRightAttFeed, 1, {
+  const recomGroupUser = clean.CleanRule('recom_group_user', () => i18n.cleanRightRecomGroupUser, 1, {
+    v7Support: true,
+    acss: '#v6_pl_rightmod_recomgroupuser { display: none; }',
+    ainit() {
+      const rule = this;
+      observer.dom.add(function hideV7RecomGroupUser() {
+        if (!rule.isEnabled()) return;
+        if (!document.querySelector('#app')) return;
+        const sidebar = document.querySelector('#__sidebar');
+        if (!sidebar) return;
+        const patterns = [/建议加入该分组/, /建議加入該分組/, /加入该分组/, /加入該分組/];
+        const panels = Array.from(sidebar.querySelectorAll('.wbpro-side, .woo-panel-main'));
+        panels.forEach(panel => {
+          if (!(panel instanceof Element)) return;
+          if (panel.hasAttribute('yawf-hide-right-recom-group-user')) return;
+          if (panel.querySelector('article')) return;
+          const tit = panel.querySelector('.wbpro-side-tit, header, h2, h3, .woo-box-item-flex');
+          const text = normalizeText(tit ? tit.textContent : panel.textContent);
+          if (!text) return;
+          if (!patterns.some(re => re.test(text))) return;
+          panel.setAttribute('yawf-hide-right-recom-group-user', '');
+          panel.style.setProperty('display', 'none', 'important');
+        });
+      });
+    },
+  });
+  const hongbaoRank = clean.CleanRule('hongbao_rank', () => i18n.cleanRightHongbaoRank, 1, {
+    v7Support: true,
+    acss: '#v6_pl_rightmod_hongbao { display: none !important; }',
+  });
+  const attFeed = clean.CleanRule('att_feed', () => i18n.cleanRightAttFeed, 1, {
     acss: '#v6_pl_rightmod_attfeed { display: none !important; }',
     ref: { i: { type: 'bubble', icon: 'warn', template: () => i18n.cleanRightAttFeedDetail } },
+    v7Support: true,
+    ainit() {
+      const rule = this;
+      observer.dom.add(function hideV7AttFeed() {
+        if (!rule.isEnabled()) return;
+        if (!document.querySelector('#app')) return;
+        const sidebar = document.querySelector('#__sidebar');
+        if (!sidebar) return;
+        const patterns = [/好友关注动态/, /好友關注動態/, /朋友关注动态/, /朋友關注動態/];
+        const panels = Array.from(sidebar.querySelectorAll('.wbpro-side, .woo-panel-main'));
+        panels.forEach(panel => {
+          if (!(panel instanceof Element)) return;
+          if (panel.hasAttribute('yawf-hide-right-att-feed')) return;
+          if (panel.querySelector('article')) return;
+          const tit = panel.querySelector('.wbpro-side-tit, header, h2, h3, .woo-box-item-flex');
+          const text = normalizeText(tit ? tit.textContent : panel.textContent);
+          if (!text) return;
+          if (!patterns.some(re => re.test(text))) return;
+          panel.setAttribute('yawf-hide-right-att-feed', '');
+          panel.style.setProperty('display', 'none', 'important');
+        });
+      });
+    },
   });
-  clean.CleanRule('notice', () => i18n.cleanRightNotice, 1, '#v6_pl_rightmod_noticeboard { display: none !important; }');
+  const notice = clean.CleanRule('notice', () => i18n.cleanRightNotice, 1, {
+    v7Support: true,
+    acss: '#v6_pl_rightmod_noticeboard { display: none !important; }',
+    ainit() {
+      const rule = this;
+      observer.dom.add(function hideV7NoticeBoard() {
+        if (!rule.isEnabled()) return;
+        if (!document.querySelector('#app')) return;
+        const sidebar = document.querySelector('#__sidebar');
+        if (!sidebar) return;
+        const patterns = [/公告栏/, /公告欄/, /公告板/, /^公告$/];
+        const panels = Array.from(sidebar.querySelectorAll('.wbpro-side, .woo-panel-main'));
+        panels.forEach(panel => {
+          if (!(panel instanceof Element)) return;
+          if (panel.hasAttribute('yawf-hide-right-notice')) return;
+          if (panel.querySelector('article')) return;
+          const tit = panel.querySelector('.wbpro-side-tit, header, h2, h3, .woo-box-item-flex');
+          const text = normalizeText(tit ? tit.textContent : panel.textContent);
+          if (!text) return;
+          if (!patterns.some(re => re.test(text))) return;
+          panel.setAttribute('yawf-hide-right-notice', '');
+          panel.style.setProperty('display', 'none', 'important');
+        });
+      });
+    },
+  });
 
   clean.tagElements('Right', [
     '#trustPagelet_indexright_recom .WB_right_module:not([yawf-id])',
@@ -12955,6 +14140,8 @@ img[src*="vvip_"] { display: none !important; }
     cardHotSearch: hotSearch,
     cardInterested: interested,
     cardService: service,
+    cardMember: member,
+    cardHongbaoRank: hongbaoRank,
   }, function (options) {
     // V7 fallback: some right sidebar modules are not exposed as Vue component VMs,
     // so also hide them by stable DOM titles under `#__sidebar`.
@@ -12967,13 +14154,15 @@ img[src*="vvip_"] { display: none !important; }
         if (!(panel instanceof Element)) return;
         if (panel.hasAttribute('yawf-right-hidden')) return;
         const tit = panel.querySelector('.wbpro-side-tit');
-        const title = (tit ? tit.textContent : panel.textContent).replace(/[\u200b\r\n]+/g, ' ').replace(/[ \t]+/g, ' ').trim();
+        const title = normalizeText(tit ? tit.textContent : panel.textContent);
         if (!title) return;
 
         const shouldHide = (
           (options.cardHotSearch && (title.includes('热搜') || title.includes('热门话题'))) ||
           (options.cardInterested && title.includes('感兴趣的人')) ||
-          (options.cardService && title.includes('创作者中心'))
+          (options.cardService && title.includes('创作者中心')) ||
+          (options.cardMember && (title.includes('会员专区') || title.includes('會員專區'))) ||
+          (options.cardHongbaoRank && title.includes('让红包飞'))
         );
 
         if (!shouldHide) return;
@@ -13034,6 +14223,10 @@ img[src*="vvip_"] { display: none !important; }
   const css = util.css;
 
   const clean = yawf.rules.clean;
+
+  const normalizeText = function (text) {
+    return String(text || '').replace(/[\u200b\r\n]+/g, ' ').replace(/[ \t]+/g, ' ').trim();
+  };
 
   Object.assign(i18n, {
     cleanFeedGroupTitle: { cn: '隐藏模块 - 微博内', tw: '隱藏模組 - 微博內', en: 'Hide modules - Weibo' },
@@ -13105,7 +14298,51 @@ img[src*="vvip_"] { display: none !important; }
   });
   clean.CleanRule('feed_outer_tip', () => i18n.cleanFeedOuterTip, 1, {
     acss: '.WB_feed > .W_tips { display: none !important; }',
-    ref: { i: { type: 'bubble', icon: 'ask', template: () => i18n.cleanFeedOuterTip } },
+    ref: { i: { type: 'bubble', icon: 'ask', template: () => i18n.cleanFeedOuterTipDetail } },
+    v7Support: true,
+    ainit() {
+      observer.dom.add(function hideV7FeedOuterTips() {
+        // V7 only
+        if (!document.querySelector('#app')) return;
+
+        const scope = document.querySelector('#homeWrap') || document.querySelector('main') || document.body;
+        const patterns = [
+          /系统提示/,
+          /根?据你.*屏蔽设置/,
+          /已过滤掉部分微博/,
+          /已為你過濾/,
+          /已过滤掉/,
+          /过滤掉/,
+        ];
+        const exclude = [
+          /有\s*\d+\s*条\s*新微博/,
+          /点击查看/,
+          /點擊查看/,
+        ];
+
+        // Heuristic: a thin banner near the top area of feed list
+        const nodes = Array.from(scope.querySelectorAll('div')).slice(0, 1200);
+        nodes.forEach(node => {
+          if (!(node instanceof Element)) return;
+          if (node.hasAttribute('yawf-hide-feed-outer-tip')) return;
+          const text = (node.textContent || '').replace(/[\u200b\r\n]+/g, ' ').replace(/[ \t]+/g, ' ').trim();
+          if (!text) return;
+          if (!patterns.some(re => re.test(text))) return;
+          if (exclude.some(re => re.test(text))) return;
+
+          const r = node.getBoundingClientRect();
+          if (r.height <= 0 || r.height > 140) return;
+          if (r.width < 240) return;
+          if (r.top > 520) return;
+
+          // Avoid hiding real feed cards
+          if (node.closest('article')) return;
+
+          node.setAttribute('yawf-hide-feed-outer-tip', '');
+          node.style.setProperty('display', 'none', 'important');
+        });
+      });
+    },
   });
   clean.CleanRule('feed_inner_tip', () => i18n.cleanFeedInnerTip, 91, {
     acss: '.yawf-feed-content .yawf-feed-content-tip-link { display: none !important; }',
@@ -13115,46 +14352,364 @@ img[src*="vvip_"] { display: none !important; }
   clean.CleanRule('feed_tip', () => i18n.cleanFeedCommentTip, 1, {
     acss: '[node-type="feed_privateset_tip"] { display: none !important; }',
     ref: { i: { type: 'bubble', icon: 'ask', template: () => i18n.cleanFeedCommentTipDetail } },
+    v7Support: true,
+    ainit() {
+      observer.dom.add(function hideV7CommentTips() {
+        const patterns = [/微博社区管理中心/, /举报处理大厅/, /欢迎查阅/, /社区管理中心/];
+        const inputs = Array.from(document.querySelectorAll([
+          'textarea[placeholder*="评论"]',
+          'textarea[placeholder*="回"]',
+          'textarea[placeholder*="Reply"]',
+          'textarea[placeholder*="comment"]',
+        ].join(',')));
+        if (!inputs.length) return;
+
+        inputs.forEach(input => {
+          const container = input.closest('main') || document.body;
+          const boxes = Array.from(container.querySelectorAll('div'));
+          boxes.forEach(box => {
+            if (!(box instanceof Element)) return;
+            if (box.hasAttribute('yawf-hide-comment-tip')) return;
+            const text = (box.textContent || '').replace(/[\u200b\r\n]+/g, ' ').replace(/[ \t]+/g, ' ').trim();
+            if (!text) return;
+            if (!patterns.some(re => re.test(text))) return;
+            // Avoid hiding the whole page: require it to be a small banner near the input
+            const r = box.getBoundingClientRect();
+            const ri = input.getBoundingClientRect();
+            const near = Math.abs(r.top - ri.top) < 260 || (r.bottom <= ri.top && ri.top - r.bottom < 260);
+            if (!near) return;
+            if (r.height > 120) return;
+            box.setAttribute('yawf-hide-comment-tip', '');
+            box.style.setProperty('display', 'none', 'important');
+          });
+        });
+      });
+    },
   });
-  clean.CleanRule('group_tip', () => i18n.cleanFeedGroupTip, 1, '.WB_feed_type .WB_cardtitle_b { display: none !important; }');
-  clean.CleanRule('vip_background', () => i18n.cleanFeedVIPBackground, 1, `
+  clean.CleanRule('group_tip', () => i18n.cleanFeedGroupTip, 1, {
+    acss: '.WB_feed_type .WB_cardtitle_b { display: none !important; }',
+    v7Support: true,
+    ainit() {
+      observer.dom.add(function hideV7FeedGroupTips() {
+        // V7 only
+        if (!document.querySelector('#app')) return;
+        const scope = document.querySelector('#homeWrap') || document.querySelector('main') || document.body;
+        const patterns = [
+          /好友圈/,
+          /分组提醒/,
+          /分組提醒/,
+          /好友圈提醒/,
+          /好友圈.*提示/,
+        ];
+        const exclude = [
+          /有\s*\d+\s*条\s*新微博/,
+          /点击查看/,
+          /點擊查看/,
+          /最新微博/,
+        ];
+        const nodes = Array.from(scope.querySelectorAll('div')).slice(0, 1200);
+        nodes.forEach(node => {
+          if (!(node instanceof Element)) return;
+          if (node.hasAttribute('yawf-hide-feed-group-tip')) return;
+          const text = (node.textContent || '').replace(/[\u200b\r\n]+/g, ' ').replace(/[ \t]+/g, ' ').trim();
+          if (!text) return;
+          if (!patterns.some(re => re.test(text))) return;
+          if (exclude.some(re => re.test(text))) return;
+
+          const r = node.getBoundingClientRect();
+          if (r.height <= 0 || r.height > 120) return;
+          if (r.width < 240) return;
+          if (r.top > 360) return;
+
+          // Avoid the main navigation / tabs area: require it to be a leaf-like banner.
+          if (node.querySelector('article')) return;
+
+          node.setAttribute('yawf-hide-feed-group-tip', '');
+          node.style.setProperty('display', 'none', 'important');
+        });
+      });
+    },
+  });
+  clean.CleanRule('vip_background', () => i18n.cleanFeedVIPBackground, 1, {
+    v7Support: true,
+    acss: `
 .WB_feed_detail[style*="feed_cover/star_"],
 .WB_feed_detail[style*="feed_cover/vip_"] { background: none !important; }
 .WB_vipcover, .WB_starcover { display: none !important; }
 .WB_feed_vipcover .WB_feed_detail { padding-top: 10px; }
 .WB_feed.WB_feed_v3 .WB_feed_vipcover .WB_feed_detail { padding-top: 20px; }
-`);
+
+/* V7 best-effort: remove feed cover background images (VIP/Star/etc) */
+#app[data-v-app] main article.woo-panel-main[style*="feed_cover"] { background-image: none !important; }
+#app[data-v-app] main article.woo-panel-main[style*="vip_"] { background-image: none !important; }
+#app[data-v-app] main article.woo-panel-main[style*="star_"] { background-image: none !important; }
+`,
+    ainit() {
+      observer.dom.add(function hideV7VipBackground() {
+        if (!document.querySelector('#app')) return;
+        const scope = document.querySelector('main') || document.body;
+        const cards = Array.from(scope.querySelectorAll('article.woo-panel-main,[class*="feed_cover"],[style*="feed_cover"]'));
+        cards.forEach(card => {
+          if (!(card instanceof Element)) return;
+          if (card.hasAttribute('yawf-clean-vip-bg')) return;
+          const bg = getComputedStyle(card).backgroundImage || '';
+          if (!bg || bg === 'none') return;
+          if (!/(feed_cover|vip_|star_|vipcover|starcover)/i.test(bg)) return;
+          card.setAttribute('yawf-clean-vip-bg', '');
+          card.style.setProperty('background-image', 'none', 'important');
+          card.style.setProperty('background', 'none', 'important');
+        });
+      });
+    },
+  });
   clean.CleanRule('last_pic', () => i18n.cleanFeedLastPic, 1, function () {
+    // Kept for legacy V6 and extended for V7 best-effort.
+    const rule = this;
+    const coverTextPatterns = [
+      /下载.*微博/,
+      /微博.*客户端/,
+      /打开.*微博/,
+      /\bAPP\b/i,
+      /打开.*客户端/,
+      /下载.*客户端/,
+      /去.*客户端/,
+      /用.*客户端/,
+    ];
+    const coverHrefPatterns = [
+      /download/i,
+      /client/i,
+      /app/i,
+      /weibo\.(cn|com)\/dl/i,
+    ];
+    const findCoverContainer = function (dlg, leaf) {
+      let cur = leaf;
+      while (cur && cur !== dlg) {
+        if (cur.hasAttribute && cur.hasAttribute('yawf-hide-last-pic-cover')) return cur;
+        if (cur.matches && cur.matches('li,[role="listitem"]')) return cur;
+        if (cur.matches && cur.matches('[class*="swiper"],[class*="slide"],[class*="carousel"],[class*="item"],[class*="Slide"]')) return cur;
+        const p = cur.parentElement;
+        if (p === dlg) return cur;
+        cur = p;
+      }
+      return leaf;
+    };
     observer.dom.add(function hideLastPic() {
+      if (!rule.isEnabled()) return;
+
+      // V6 behavior (safe no-op on V7)
       const last = document.querySelector('.WB_feed_type .WB_expand_media .WB_media_view:not([yawf-piclast]) .pic_choose_box li:last-child a.current');
       if (last) last.closest('.WB_media_view').setAttribute('yawf-piclast', 'yawf-piclast');
       const notLast = document.querySelector('.WB_feed_type .WB_expand_media .WB_media_view[yawf-piclast] .pic_choose_box li:not(:last-child) a.current');
       if (notLast) notLast.closest('.WB_media_view').removeAttribute('yawf-piclast');
       const close = document.querySelector('.WB_feed_type .WB_expand_media .WB_media_view .artwork_box .ficon_close ');
       if (close) close.click();
+
+      // V7 best-effort: hide "cover" / app-download slides in image preview modals.
+      if (!document.querySelector('#app')) return;
+      const dialogs = Array.from(document.querySelectorAll([
+        'div[role="dialog"]',
+        '.woo-modal-wrap',
+        '.woo-modal',
+        '.woo-dialog-wrap',
+        '.woo-dialog',
+      ].join(',')));
+      dialogs.forEach(dlg => {
+        if (!(dlg instanceof Element)) return;
+        const dialogText = normalizeText(dlg.textContent);
+        if (!dialogText) return;
+        if (!(dialogText.includes('微博') || /\\bAPP\\b/i.test(dialogText) || dialogText.includes('客户端'))) return;
+
+        const candidates = Array.from(dlg.querySelectorAll('a,button,div,span,p')).slice(0, 1200);
+        candidates.forEach(el => {
+          if (!(el instanceof Element)) return;
+          if (el.childElementCount !== 0) return;
+          if (el.hasAttribute('yawf-hide-last-pic-cover')) return;
+          const text = normalizeText(el.textContent);
+          if (!text || text.length > 32) return;
+          if (!coverTextPatterns.some(re => re.test(text))) return;
+
+          const link = el.closest('a[href]');
+          const href = link ? String(link.getAttribute('href') || '') : '';
+          if (href && !coverHrefPatterns.some(re => re.test(href))) return;
+
+          const container = findCoverContainer(dlg, el);
+          if (!(container instanceof Element)) return;
+          if (container.hasAttribute('yawf-hide-last-pic-cover')) return;
+          // Avoid hiding real image slides.
+          if (container.querySelector('img[src*=\"sinaimg\"],img[src*=\"sinaimg.cn\"],video')) return;
+          container.setAttribute('yawf-hide-last-pic-cover', '');
+          container.style.setProperty('display', 'none', 'important');
+        });
+      });
     });
-    css.append('.WB_feed_type .WB_expand_media .WB_media_view[yawf-piclast] .rightcursor { cursor: url("//img.t.sinajs.cn/t6/style/images/common/small.cur"), auto !important; }');
+    css.append('.WB_feed_type .WB_expand_media .WB_media_view[yawf-piclast] .rightcursor { cursor: url(\"//img.t.sinajs.cn/t6/style/images/common/small.cur\"), auto !important; }');
+  }, { v7Support: true });
+  clean.CleanRule('pic_tag', () => i18n.cleanFeedPicTag, 1, {
+    v7Support: true,
+    acss: `
+.WB_media_view .media_show_box .artwork_box .tag_showpicL,
+.WB_media_view .media_show_box .artwork_box .tag_showpicR,
+.icon_taged_pic { display: none !important; }
+
+/* V7: picture overlay tags like "Live" / "GIF" */
+#app[data-v-app] .picture [class*="_tag_"] { display: none !important; }
+`,
   });
-  clean.CleanRule('pic_tag', () => i18n.cleanFeedPicTag, 1, '.WB_media_view .media_show_box .artwork_box .tag_showpicL, .WB_media_view .media_show_box .artwork_box .tag_showpicR, .icon_taged_pic { display: none !important; }');
-  clean.CleanRule('son_title', () => i18n.cleanFeedSonTitle, 1, '.WB_feed_type .WB_feed_together .wft_hd { display: none !important; }');
+  clean.CleanRule('son_title', () => i18n.cleanFeedSonTitle, 1, {
+    v7Support: true,
+    acss: '.WB_feed_type .WB_feed_together .wft_hd { display: none !important; }',
+    ainit() {
+      observer.dom.add(function hideV7MergedForwardTitle() {
+        if (!document.querySelector('#app')) return;
+        const scope = document.querySelector('main') || document.body;
+        const candidates = Array.from(scope.querySelectorAll('article.woo-panel-main, article, .woo-panel-main'));
+        const patterns = [
+          /同源转发/,
+          /同源轉發/,
+          /同一来源转发/,
+          /同一來源轉發/,
+          /以下为.*转发微博/,
+          /以下為.*轉發微博/,
+          /以下为同源/,
+          /以下為同源/,
+        ];
+        candidates.forEach(card => {
+          if (!(card instanceof Element)) return;
+          const nodes = Array.from(card.querySelectorAll('div,span,p')).slice(0, 200);
+          nodes.forEach(node => {
+            if (!(node instanceof Element)) return;
+            if (node.hasAttribute('yawf-hide-son-title')) return;
+            const text = (node.textContent || '').replace(/[\u200b\r\n]+/g, ' ').replace(/[ \t]+/g, ' ').trim();
+            if (!text) return;
+            if (!patterns.some(re => re.test(text))) return;
+            const r = node.getBoundingClientRect();
+            if (r.height <= 0 || r.height > 80) return;
+            if (r.width < 180) return;
+            // Avoid hiding normal content text blocks.
+            if (node.querySelector('a[href],img,video')) return;
+            node.setAttribute('yawf-hide-son-title', '');
+            node.style.setProperty('display', 'none', 'important');
+          });
+        });
+      });
+    },
+  });
   clean.CleanRule('card', () => i18n.cleanFeedCard, 1, {
-    acss: '.WB_pic_app, .WB_feed_spec, .WB_music { display: none !important; }',
+    v7Support: true,
+    acss: `
+.WB_pic_app, .WB_feed_spec, .WB_music { display: none !important; }
+/* V7: common inline cards (best-effort; depends on Vue component tagging) */
+[yawf-component-tag~="topic-card"],
+[yawf-component-tag~="location-card"] { display: none !important; }
+`,
     ref: { i: { type: 'bubble', icon: 'ask', template: () => i18n.cleanFeedCardDetail } },
   });
-  clean.CleanRule('article_pay', () => i18n.cleanFeedArticlePay, 1, function () {
-    observer.dom.add(function hideArticlePay() {
-      const element1 = document.querySelector('.feed_app_btn_a a[action-data*="px.e.weibo.com"]');
-      if (element1) element1.closest('.feed_app_btn_a').remove();
-      const element2 = document.querySelector('.WB_cardwrap #pl_article_articlePay');
-      if (element2) element2.closest('.WB_cardwrap').remove();
-      const element3 = document.querySelector('.rewardcomponent a[action-type="buyWrap"][action-data*="type=reward"]');
-      if (element3) element3.closest('.rewardcomponent').closest(':not(:only-child)').remove();
-    });
+  clean.CleanRule('article_pay', () => i18n.cleanFeedArticlePay, 1, {
+    v7Support: true,
+    acss: `
+/* V7: reward / tip button module (tagged by YAWF render hooks) */
+#app[data-v-app] [yawf-component-tag~="reward-button"] { display: none !important; }
+`,
+    ainit() {
+      const rule = this;
+      observer.dom.add(function hideArticlePay() {
+        if (!rule.isEnabled()) return;
+
+        // V6 selectors (safe no-op on V7)
+        const element1 = document.querySelector('.feed_app_btn_a a[action-data*="px.e.weibo.com"]');
+        if (element1) element1.closest('.feed_app_btn_a').remove();
+        const element2 = document.querySelector('.WB_cardwrap #pl_article_articlePay');
+        if (element2) element2.closest('.WB_cardwrap').remove();
+        const element3 = document.querySelector('.rewardcomponent a[action-type="buyWrap"][action-data*="type=reward"]');
+        if (element3) element3.closest('.rewardcomponent').closest(':not(:only-child)').remove();
+
+        // V7 best-effort: hide "打赏/赞赏" buttons/blocks
+        if (!document.querySelector('#app')) return;
+        const scope = document.querySelector('main,[role="main"]') || document.body;
+
+        // Preferred: hide the whole reward module if it was tagged by our V7 hooks
+        Array.from(scope.querySelectorAll('[yawf-component-tag~="reward-button"]')).forEach(box => {
+          if (!(box instanceof Element)) return;
+          if (box.hasAttribute('yawf-hide-article-pay')) return;
+          box.setAttribute('yawf-hide-article-pay', '');
+          box.style.setProperty('display', 'none', 'important');
+        });
+
+        const patterns = [
+          /^打赏$/,
+          /^讚賞$/,
+          /^赞赏$/,
+          /^投喂$/,
+          /^为TA助威$/,
+          /^為TA助威$/,
+          /打赏作者/,
+          /赞赏作者/,
+          /投喂作者/,
+        ];
+        const candidates = Array.from(scope.querySelectorAll('button,a,[role=\"button\"],div.btn')).slice(0, 3600);
+        candidates.forEach(el => {
+          if (!(el instanceof Element)) return;
+          if (el.hasAttribute('yawf-hide-article-pay')) return;
+          const text = normalizeText(el.textContent);
+          if (!text || text.length > 12) return;
+          if (!patterns.some(re => re.test(text))) return;
+          const btn = el.closest('button,[role=\"button\"],a') || el;
+          btn.setAttribute('yawf-hide-article-pay', '');
+          btn.style.setProperty('display', 'none', 'important');
+        });
+      });
+    },
   });
-  clean.CleanRule('tag', () => i18n.cleanFeedTag, 1, '.WB_tag { display: none !important; }');
+  clean.CleanRule('tag', () => i18n.cleanFeedTag, 1, {
+    v7Support: true,
+    acss: `
+.WB_tag { display: none !important; }
+/* V7 (best-effort, depends on [[feed_render]]): "置顶/推荐/..." tag near time */
+.yawf-feed-tag { display: none !important; }
+`,
+  });
   clean.CleanRule('related_link', () => i18n.cleanFeedRelatedLink, 1, {
     acss: '.WB_feed_type .WB_tag_rec { display: none !important; }',
     ref: { i: { type: 'bubble', icon: 'ask', template: () => i18n.cleanFeedRelatedLinkDetail } },
+    v7Support: true,
+    ainit() {
+      const rule = this;
+      observer.dom.add(function hideV7RelatedLinks() {
+        if (!rule.isEnabled()) return;
+        if (!document.querySelector('#app')) return;
+
+        const scope = document.querySelector('main,[role="main"]') || document.body;
+        const articles = Array.from(scope.querySelectorAll('article.woo-panel-main, article'));
+        const hrefLike = href => {
+          const h = String(href || '');
+          return /s\.weibo\.com\//.test(h) || /weibo\.com\/(p|search)\//.test(h);
+        };
+
+        articles.forEach(article => {
+          if (!(article instanceof Element)) return;
+          const blocks = Array.from(article.querySelectorAll('div,section')).slice(0, 500);
+          blocks.forEach(block => {
+            if (!(block instanceof Element)) return;
+            if (block.hasAttribute('yawf-hide-related-links')) return;
+            if (block.closest('header,footer')) return;
+            if (block.closest('.wbpro-feed-ogText,.wbpro-feed-reText')) return;
+            if (block.closest('[class*="toolbar"],[class*="ToolBar"],.yawf-feed-toolbar')) return;
+
+            const links = Array.from(block.querySelectorAll('a[href]')).filter(a => hrefLike(a.getAttribute('href')));
+            if (links.length < 2) return;
+            const text = normalizeText(block.textContent);
+            if (!text || text.length > 80) return;
+            if (block.querySelector('img,video')) return;
+
+            const short = links.filter(a => normalizeText(a.textContent).length <= 16);
+            if (short.length < 2) return;
+
+            block.setAttribute('yawf-hide-related-links', '');
+            block.style.setProperty('display', 'none', 'important');
+          });
+        });
+      });
+    },
   });
   clean.CleanRule('source', () => i18n.cleanFeedSource, 1, {
     acss: `
@@ -13163,18 +14718,172 @@ img[src*="vvip_"] { display: none !important; }
     ref: { i: { type: 'bubble', icon: 'warn', template: () => i18n.cleanFeedSourceDetail } },
     v7Support: true,
   });
-  clean.CleanRule('pop', () => i18n.cleanFeedPop, 1, `
-`);
+  clean.CleanRule('pop', () => i18n.cleanFeedPop, 1, {
+    // V7: video view count ("xxxx次观看") and similar "extra info" badges
+    acss: `
+main article div[class*="plusInfo"] { display: none !important; }
+`,
+    v7Support: true,
+    ainit() {
+      observer.dom.add(function hideV7FeedReadAndPromote() {
+        const root = document.querySelector('main,[role="main"]') || document.body;
+        const nodes = Array.from(root.querySelectorAll('article .woo-box-flex'));
+        nodes.forEach(node => {
+          if (!(node instanceof Element)) return;
+          if (node.hasAttribute('yawf-hide-read-promote')) return;
+          const text = (node.textContent || '').replace(/[\u200b\r\n]+/g, ' ').replace(/[ \t]+/g, ' ').trim();
+          if (!text) return;
+
+          // "1202 阅读"
+          if (/^\d+\s*阅读$/.test(text) || /^\d+\s*閱讀$/.test(text)) {
+            node.setAttribute('yawf-hide-read-promote', '');
+            node.style.setProperty('display', 'none', 'important');
+            return;
+          }
+
+          // "推广" (often appears as a pill next to read count)
+          if (text === '推广' || text === '推廣') {
+            const box = node.closest('.woo-box-flex') || node;
+            box.setAttribute('yawf-hide-read-promote', '');
+            box.style.setProperty('display', 'none', 'important');
+          }
+        });
+      });
+    },
+  });
   clean.CleanRule('like', () => i18n.cleanFeedLike, 1, `.yawf-feed-toolbar-like { display: none !important; }`, { v7Support: true });
   clean.CleanRule('like_comment', () => i18n.cleanFeedLikeComment, 1, `.yawf-feed-comment-icon-list [yawf-icon-list-name="like"] { display: none !important; }`, { v7Support: true });
   clean.CleanRule('like_attitude', () => i18n.cleanFeedLikeAttitude, 1, '.W_layer_attitude { display: none !important; }');
   clean.CleanRule('forward', () => i18n.cleanFeedForward, 1, `.yawf-feed-toolbar-retweet { display: none !important; }`, { v7Support: true });
   clean.CleanRule('fast_repost', () => i18n.cleanFeedFastRepost, 83, { v7Support: true }); // 实现在 render
-  clean.CleanRule('favorite', () => i18n.cleanFeedFavorite, 1, `
-`);
-  clean.CleanRule('promote_other', () => i18n.cleanFeedPromoteOther, 1, '.screen_box .layer_menu_list a[action-data*="promote.vip.weibo.com"] { display: none !important; }');
-  clean.CleanRule('report', () => i18n.cleanFeedReport, 1, '.screen_box .layer_menu_list a[onclick*="service.account.weibo.com/reportspam"], .WB_handle ul li[yawf-comment-handle-type="report"] { display: none !important; }');
-  clean.CleanRule('use_card_background', () => i18n.cleanFeedUseCardBackground, 1, '.screen_box .layer_menu_list a[action-type="fl_cardCover"] { display: none !important; }');
+
+  const hideV7FeedMenuItem = function (matcher, markAttr) {
+    observer.dom.add(function yawfHideV7FeedMenuItem() {
+      if (!document.querySelector('#app')) return;
+      const popMains = Array.from(document.querySelectorAll('div.woo-pop-wrap-main'));
+      popMains.forEach(popMain => {
+        if (!(popMain instanceof Element)) return;
+
+        const findMenuRow = (leaf) => {
+          let cur = leaf;
+          while (cur && cur !== popMain) {
+            if (cur.classList?.contains?.('yawf-settings-item')) return null;
+            if (cur.hasAttribute?.(markAttr)) return cur;
+            if (cur.matches?.('[role="menuitem"],li,button,a')) return cur;
+            if (cur.matches?.('.woo-pop-item-main,.woo-pop-item,[class*="woo-pop-item"],[class*="popItem"],[class*="pop_item"]')) return cur;
+            if (cur.parentElement === popMain) return cur;
+            const p = cur.parentElement;
+            if (p?.getAttribute?.('role') === 'menu') return cur;
+            cur = p;
+          }
+          // Fall back to a direct child of popMain if possible
+          return leaf.parentElement && popMain.contains(leaf.parentElement) ? leaf.parentElement : leaf;
+        };
+
+        // Use leaf nodes: on Weibo V7 menus, text is often nested inside multiple wrappers;
+        // matching leaf text avoids accidental matches on container textContent.
+        const leaves = Array.from(popMain.querySelectorAll('*')).filter(el => {
+          if (!(el instanceof Element)) return false;
+          if (el.childElementCount !== 0) return false;
+          const t = (el.textContent || '').replace(/[\u200b\r\n]+/g, ' ').replace(/[ \t]+/g, ' ').trim();
+          if (!t) return false;
+          if (t.length > 40) return false;
+          return true;
+        });
+
+        leaves.forEach(leaf => {
+          const container = findMenuRow(leaf);
+          if (!container) return;
+          if (!(container instanceof Element)) return;
+          if (container.hasAttribute(markAttr)) return;
+
+          const text = (leaf.textContent || '').replace(/[\u200b\r\n]+/g, ' ').replace(/[ \t]+/g, ' ').trim();
+          const actionType = container.getAttribute('action-type') || container.closest('[action-type]')?.getAttribute?.('action-type') || '';
+          const actionData = container.getAttribute('action-data') || container.closest('[action-data]')?.getAttribute?.('action-data') || '';
+          const href = (container.getAttribute('href') || container.querySelector?.('a[href]')?.getAttribute?.('href') || '');
+          if (!matcher({ text, actionType, actionData, href, item: container, popMain })) return;
+
+          container.setAttribute(markAttr, '');
+          container.style.setProperty('display', 'none', 'important');
+        });
+      });
+    });
+  };
+
+  clean.CleanRule('favorite', () => i18n.cleanFeedFavorite, 1, {
+    v7Support: true,
+    acss: `
+/* V7: 收藏按钮/菜单项 */
+#app[data-v-app] [action-type="fl_favorite"] { display: none !important; }
+`,
+    ainit() {
+      hideV7FeedMenuItem(({ actionType, text }) => (
+        actionType === 'fl_favorite' ||
+        text === '收藏' || text === '已收藏' || text === '取消收藏'
+      ), 'yawf-hide-menu-favorite');
+    },
+  });
+
+  clean.CleanRule('promote_other', () => i18n.cleanFeedPromoteOther, 1, {
+    v7Support: true,
+    acss: `
+.screen_box .layer_menu_list a[action-data*="promote.vip.weibo.com"] { display: none !important; }
+`,
+    ainit() {
+      hideV7FeedMenuItem(({ actionData, href, text }) => (
+        /promote\.vip\.weibo\.com/i.test(actionData) ||
+        /promote\.vip\.weibo\.com/i.test(href) ||
+        text.includes('帮上头条')
+      ), 'yawf-hide-menu-promote-other');
+    },
+  });
+
+  clean.CleanRule('report', () => i18n.cleanFeedReport, 1, {
+    v7Support: true,
+    acss: `
+.screen_box .layer_menu_list a[onclick*="service.account.weibo.com/reportspam"],
+.WB_handle ul li[yawf-comment-handle-type="report"] { display: none !important; }
+
+/* V7: comment/report icon (e.g. title="投诉") */
+#app[data-v-app] .wbpro-iconbed:has(i.woo-font.woo-font--report[title]),
+#app[data-v-app] i.woo-font.woo-font--report[title] { display: none !important; }
+`,
+    ainit() {
+      hideV7FeedMenuItem(({ actionType, href, text }) => (
+        actionType === 'report' ||
+        /reportspam/i.test(href) ||
+        text === '举报' || text === '舉報' || text === '投诉' || text === '檢舉'
+      ), 'yawf-hide-menu-report');
+
+      // Extra DOM fallback: hide the whole clickable container around the report icon (avoid leaving an empty button).
+      observer.dom.add(function hideV7ReportIconButtons() {
+        if (!document.querySelector('#app')) return;
+        const icons = Array.from(document.querySelectorAll('i.woo-font.woo-font--report[title]'));
+        icons.forEach(icon => {
+          if (!(icon instanceof Element)) return;
+          const btn = icon.closest('.wbpro-iconbed,button,a,[role="button"],[role="menuitem"]') || icon.parentElement;
+          if (!(btn instanceof Element)) return;
+          if (btn.hasAttribute('yawf-hide-report-icon')) return;
+          btn.setAttribute('yawf-hide-report-icon', '');
+          btn.style.setProperty('display', 'none', 'important');
+        });
+      });
+    },
+  });
+
+  clean.CleanRule('use_card_background', () => i18n.cleanFeedUseCardBackground, 1, {
+    v7Support: true,
+    acss: `
+.screen_box .layer_menu_list a[action-type="fl_cardCover"] { display: none !important; }
+#app[data-v-app] [action-type="fl_cardCover"] { display: none !important; }
+`,
+    ainit() {
+      hideV7FeedMenuItem(({ actionType, text }) => (
+        actionType === 'fl_cardCover' ||
+        text.includes('使用此卡片背景')
+      ), 'yawf-hide-menu-card-cover');
+    },
+  });
 
   // 标记微博评论按钮
   observer.dom.add(function markCommentButton() {
@@ -13239,7 +14948,27 @@ body .WB_handle ul li { flex: 1 1 auto; float: none; width: auto; }
   });
 
   clean.CleanGroup('profile', () => i18n.cleanProfileGroupTitle);
-  clean.CleanRule('move_things', () => i18n.cleanProfileMoveThings, 1, '.profile_move_things { display: none !important; }');
+  clean.CleanRule('move_things', () => i18n.cleanProfileMoveThings, 1, {
+    acss: '.profile_move_things { display: none !important; }',
+    v7Support: true,
+    ainit() {
+      observer.dom.add(function hideV7ProfileMoveThings() {
+        if (!location.pathname.startsWith('/u/')) return;
+        const main = document.querySelector('main') || document.body;
+        const candidates = Array.from(main.querySelectorAll('button,[role="button"],a'));
+        candidates.forEach(el => {
+          if (!(el instanceof Element)) return;
+          if (el.hasAttribute('yawf-hide-move-things')) return;
+          const text = (el.textContent || '').replace(/[\u200b\r\n]+/g, ' ').replace(/[ \t]+/g, ' ').trim();
+          if (!text) return;
+          if (!/移动部件|移動部件/.test(text)) return;
+          const box = el.closest('.woo-panel-main,.wbpro-side,.woo-box-flex,div') || el;
+          box.setAttribute('yawf-hide-move-things', '');
+          box.style.setProperty('display', 'none', 'important');
+        });
+      });
+    },
+  });
   clean.CleanRule('cover', () => i18n.cleanProfileCover, 1, function () {
     css.append(`
 .PCD_header.PCD_header, .PCD_header.PCD_header .pf_wrap, .PCD_header.PCD_header .shadow { height: 130px; }
@@ -13257,19 +14986,63 @@ body .WB_handle ul li { flex: 1 1 auto; float: none; width: auto; }
       if (!intro) return;
       intro.setAttribute('yawf-full-intro', (intro.textContent = intro.title));
     });
+  }, {
+    v7Support: true,
+    acss: `
+/* V7: profile cover/header */
+#app[data-v-app] [yawf-component-tag~="prof-cover"] { display: none !important; }
+`,
   });
   clean.CleanRule('bg_img', () => i18n.cleanProfileBGImg, 1, '.S_page, .S_page .WB_miniblog { background-image: url("\'\'") !important; }');
   clean.CleanRule('badge_icon', () => i18n.cleanProfileBadgeIcon, 1, '.pf_badge_icon { display: none !important; }');
   clean.CleanRule('verify', () => i18n.cleanProfileVerify, 1, '[yawf-id="yawf-pr-pcd-person-info-my"] .verify_area, [yawf-id="yawf-pr-pcd-person-info"] .verify_area { display: none !important; }');
   clean.CleanRule('edit_person_info', () => i18n.cleanProfileEditPersonInfo, 1, '[yawf-id="yawf-pr-pcd-person-info-my"] { display: none !important; }');
-  clean.CleanRule('stats', () => i18n.cleanProfileStats, 1, '[yawf-id="yawf-pr-pcd-counter"] { display: none !important; }');
+  clean.CleanRule('stats', () => i18n.cleanProfileStats, 1, `
+[yawf-id="yawf-pr-pcd-counter"] { display: none !important; }
+/* V7: profile stats */
+#app[data-v-app] [yawf-component-tag~="prof-stats"] { display: none !important; }
+`, { v7Support: true });
   clean.CleanRule('my_data', () => i18n.cleanProfileMyData, 1, '[id^="Pl_Official_MyMicroworld__"], .WB_frame_b [id^="Pl_Official_MyPopularity__"] { display: none !important; }');
   clean.CleanRule('suggest_user', () => i18n.cleanProfileSuggestUser, 1, '[id^="Pl_Core_RightUserList__"], .WB_frame_b [id^="Pl_Core_RightUserList__"] { display: none !important; }');
   clean.CleanRule('group', () => i18n.cleanProfileGroup, 1, '[id^="Pl_Core_UserGrid__"] { display: none !important; }');
-  clean.CleanRule('relation', () => i18n.cleanProfileRelation, 1, '[id^="Pl_Core_RightUserGrid__"], .WB_frame_b [id^="Pl_Core_RightUserGrid__"] { display: none !important; }');
-  clean.CleanRule('album', () => i18n.cleanProfileAlbum, 1, '[id^="Pl_Core_RightPicMulti__"], .WB_frame_b [id^="Pl_Core_RightPicMulti__"], [yawf-obj-name="相冊"], [yawf-obj-name="相册"], [yawf-id="yawf-core-right-pic-multi"] { display: none !important; }');
+  clean.CleanRule('relation', () => i18n.cleanProfileRelation, 1, `
+[id^="Pl_Core_RightUserGrid__"], .WB_frame_b [id^="Pl_Core_RightUserGrid__"] { display: none !important; }
+/* V7: relation module */
+#app[data-v-app] [yawf-component-tag~="relation"] { display: none !important; }
+`, { v7Support: true });
+  clean.CleanRule('album', () => i18n.cleanProfileAlbum, 1, `
+[id^="Pl_Core_RightPicMulti__"], .WB_frame_b [id^="Pl_Core_RightPicMulti__"], [yawf-obj-name="相冊"], [yawf-obj-name="相册"], [yawf-id="yawf-core-right-pic-multi"] { display: none !important; }
+/* V7: album module */
+#app[data-v-app] [yawf-component-tag~="album"] { display: none !important; }
+`, { v7Support: true });
   clean.CleanRule('hot_topic', () => i18n.cleanProfileHotTopic, 1, '[id^="Pl_Core_RightTextSingle__"], .WB_frame_b [id^="Pl_Core_RightTextSingle__"] { display: none !important; }');
-  clean.CleanRule('hot_weibo', () => i18n.cleanProfileHotWeibo, 1, '[id^="Pl_Core_RightPicText__"], .WB_frame_b [id^="Pl_Core_RightPicText__"] { display: none !important; }');
+  clean.CleanRule('hot_weibo', () => i18n.cleanProfileHotWeibo, 1, {
+    acss: '[id^="Pl_Core_RightPicText__"], .WB_frame_b [id^="Pl_Core_RightPicText__"] { display: none !important; }',
+    v7Support: true,
+    ainit() {
+      observer.dom.add(function hideV7ProfileHotWeibo() {
+        if (!location.pathname.startsWith('/u/')) return;
+        const scopes = [
+          document.querySelector('#__sidebar'),
+          document.querySelector('main'),
+        ].filter(Boolean);
+        scopes.forEach(scope => {
+          const panels = Array.from(scope.querySelectorAll('.wbpro-side, .woo-panel-main'));
+          panels.forEach(panel => {
+            if (!(panel instanceof Element)) return;
+            if (panel.tagName === 'ARTICLE') return;
+            if (panel.hasAttribute('yawf-hide-profile-hot-weibo')) return;
+            const titleEl = panel.querySelector('.wbpro-side-tit, header, h2, h3, .woo-box-item-flex');
+            const title = titleEl ? titleEl.textContent.replace(/[\u200b\r\n]+/g, '').trim() : '';
+            if (!title) return;
+            if (!(title.includes('热门微博') || title.includes('熱門微博'))) return;
+            panel.setAttribute('yawf-hide-profile-hot-weibo', '');
+            panel.style.setProperty('display', 'none', 'important');
+          });
+        });
+      });
+    },
+  });
   clean.CleanRule('recommend_feed', () => i18n.cleanProfileRecommendFeed, 1, {
     v7Support: true,
     acss: '.WB_frame_b [id^="Pl_Core_RecommendFeed__"] { display: none !important; }',
@@ -13293,9 +15066,118 @@ body .WB_handle ul li { flex: 1 1 auto; float: none; width: auto; }
     },
   });
   clean.CleanRule('user_list', () => i18n.cleanProfileUserList, 1, '[id^="Pl_Core_Ut1UserList__"], .WB_frame_b [id^="Pl_Core_RightPicText__"] { display: none !important; }');
-  clean.CleanRule('hongbao', () => i18n.cleanProfileHongbao, 1, '[yawf-id="yawf-pr-hongbao"], .WB_red2017 { display: none !important; }');
-  clean.CleanRule('wenwo_dr', () => i18n.cleanProfileWenwoDr, 1, '[yawf-obj-name="爱问医生"] { display: none !important; }'); // 对应模块没有繁体或英文翻译
-  clean.CleanRule('timeline', () => i18n.cleanProfileTimeline, 1, '[id^="Pl_Official_TimeBase__"] { display: none !important; }');
+  clean.CleanRule('hongbao', () => i18n.cleanProfileHongbao, 1, {
+    acss: '[yawf-id="yawf-pr-hongbao"], .WB_red2017 { display: none !important; }',
+    v7Support: true,
+    ainit() {
+      observer.dom.add(function hideV7ProfileHongbao() {
+        if (!location.pathname.startsWith('/u/')) return;
+        const scopes = [
+          document.querySelector('#__sidebar'),
+          document.querySelector('main'),
+        ].filter(Boolean);
+        scopes.forEach(scope => {
+          const panels = Array.from(scope.querySelectorAll('.wbpro-side, .woo-panel-main'));
+          panels.forEach(panel => {
+            if (!(panel instanceof Element)) return;
+            if (panel.tagName === 'ARTICLE') return;
+            if (panel.hasAttribute('yawf-hide-profile-hongbao')) return;
+            const titleEl = panel.querySelector('.wbpro-side-tit, header, h2, h3, .woo-box-item-flex');
+            const title = titleEl ? titleEl.textContent.replace(/[\u200b\r\n]+/g, '').trim() : '';
+            if (title && (title.includes('微博红包') || title.includes('紅包'))) {
+              panel.setAttribute('yawf-hide-profile-hongbao', '');
+              panel.style.setProperty('display', 'none', 'important');
+              return;
+            }
+            const hasHongbaoLink = !!panel.querySelector('a[href*=\"hongbao.weibo.com/hongbao\"],a[href*=\"weibo.com/hongbao\"],a[href*=\"sina.com.cn/hongbao\"]');
+            if (!hasHongbaoLink) return;
+            panel.setAttribute('yawf-hide-profile-hongbao', '');
+            panel.style.setProperty('display', 'none', 'important');
+          });
+        });
+      });
+    },
+  });
+  clean.CleanRule('wenwo_dr', () => i18n.cleanProfileWenwoDr, 1, {
+    // 对应模块没有繁体或英文翻译
+    acss: '[yawf-obj-name="爱问医生"] { display: none !important; }',
+    v7Support: true,
+    ainit() {
+      observer.dom.add(function hideV7ProfileWenwoDr() {
+        if (!location.pathname.startsWith('/u/')) return;
+        const scopes = [
+          document.querySelector('#__sidebar'),
+          document.querySelector('main'),
+        ].filter(Boolean);
+        scopes.forEach(scope => {
+          const panels = Array.from(scope.querySelectorAll('.wbpro-side, .woo-panel-main'));
+          panels.forEach(panel => {
+            if (!(panel instanceof Element)) return;
+            if (panel.tagName === 'ARTICLE') return;
+            if (panel.hasAttribute('yawf-hide-profile-wenwo')) return;
+
+            const titleEl = panel.querySelector('.wbpro-side-tit, header, h2, h3, .woo-box-item-flex');
+            const title = titleEl ? titleEl.textContent.replace(/[\u200b\r\n]+/g, '').trim() : '';
+            if (title && /爱问医生|愛問醫生/.test(title)) {
+              panel.setAttribute('yawf-hide-profile-wenwo', '');
+              panel.style.setProperty('display', 'none', 'important');
+              return;
+            }
+
+            const hasLink = !!panel.querySelector('a[href*=\"wenwo.com\"],a[href*=\"dr.wenwo.com\"]');
+            if (!hasLink) return;
+            panel.setAttribute('yawf-hide-profile-wenwo', '');
+            panel.style.setProperty('display', 'none', 'important');
+          });
+        });
+      });
+    },
+  });
+  clean.CleanRule('timeline', () => i18n.cleanProfileTimeline, 1, {
+    v7Support: true,
+    acss: `
+[id^="Pl_Official_TimeBase__"] { display: none !important; }
+`,
+    ainit() {
+      const rule = this;
+      const normalizeText = text => String(text || '')
+        .replace(/[\u200b\r\n]+/g, ' ')
+        .replace(/[ \t]+/g, ' ')
+        .trim();
+      const titlePatterns = [
+        /时间轴/,
+        /時間軸/,
+        /\bTimeline\b/i,
+      ];
+      observer.dom.add(function hideV7ProfileTimeline() {
+        if (!rule.isEnabled()) return;
+        if (!document.querySelector('#app')) return;
+        // Best-effort: apply on profile-like routes only.
+        if (!(/^\/u\//.test(location.pathname) || /^\/\d+/.test(location.pathname))) return;
+
+        const scopes = [
+          document.querySelector('#__sidebar'),
+          document.querySelector('main'),
+        ].filter(Boolean);
+        scopes.forEach(scope => {
+          const panels = Array.from(scope.querySelectorAll('.wbpro-side, .woo-panel-main'));
+          panels.forEach(panel => {
+            if (!(panel instanceof Element)) return;
+            if (panel.tagName === 'ARTICLE') return;
+            if (panel.hasAttribute('yawf-hide-profile-timeline')) return;
+
+            const titleEl = panel.querySelector('.wbpro-side-tit, header, h2, h3, .woo-box-item-flex');
+            const title = normalizeText(titleEl ? titleEl.textContent : '');
+            if (!title) return;
+            if (!titlePatterns.some(re => re.test(title))) return;
+
+            panel.setAttribute('yawf-hide-profile-timeline', '');
+            panel.style.setProperty('display', 'none', 'important');
+          });
+        });
+      });
+    },
+  });
 
   clean.tagElements('Profile', [
     '.WB_frame_b > div:not(:empty):not([yawf-id])',
@@ -13331,10 +15213,15 @@ body .WB_handle ul li { flex: 1 1 auto; float: none; width: auto; }
 
   const yawf = window.yawf;
   const util = yawf.util;
+  const observer = yawf.observer;
 
   const i18n = util.i18n;
 
   const clean = yawf.rules.clean;
+
+  const normalizeText = function (text) {
+    return String(text || '').replace(/[\u200b\r\n]+/g, ' ').replace(/[ \t]+/g, ' ').trim();
+  };
 
   Object.assign(i18n, {
     cleanMessageGroupTitle: { cn: '隐藏模块 - 消息页面', tw: '隱藏模組 - 消息網頁', en: 'Hide modules - News page' },
@@ -13343,8 +15230,64 @@ body .WB_handle ul li { flex: 1 1 auto; float: none; width: auto; }
   });
 
   clean.CleanGroup('message', () => i18n.cleanMessageGroupTitle);
-  clean.CleanRule('help', () => i18n.cleanMessageHelp, 1, '#v6_pl_rightmod_helpat, #v6_pl_rightmod_helpcomment, #v6_pl_rightmod_helplike, #v6_pl_rightmod_helpnotebox, #v6_pl_rightmod_helpfav, #v6_pl_rightmod_helpgroupchatnotice { display: none !important; }');
-  clean.CleanRule('feedback', () => i18n.cleanMessageFeedback, 1, '#v6_pl_rightmod_feedback { display: none !important; }');
+  clean.CleanRule('help', () => i18n.cleanMessageHelp, 1, {
+    acss: '#v6_pl_rightmod_helpat, #v6_pl_rightmod_helpcomment, #v6_pl_rightmod_helplike, #v6_pl_rightmod_helpnotebox, #v6_pl_rightmod_helpfav, #v6_pl_rightmod_helpgroupchatnotice { display: none !important; }',
+    v7Support: true,
+    ainit() {
+      const rule = this;
+      observer.dom.add(function hideV7MessageHelp() {
+        if (!rule.isEnabled()) return;
+        if (!document.querySelector('#app')) return;
+        if (!/^\/at\//.test(location.pathname || '')) return;
+
+        const patterns = [/使用小帮助/, /使用小幫助/, /小帮助/, /小幫助/, /\bTips?\b/i];
+        const root = document.querySelector('#__sidebar') || document.querySelector('main,[role="main"]') || document.body;
+        const panels = Array.from(root.querySelectorAll('.woo-panel-main,.wbpro-side'));
+        panels.forEach(panel => {
+          if (!(panel instanceof Element)) return;
+          if (panel.hasAttribute('yawf-hide-message-help')) return;
+          if (panel.querySelector('article')) return;
+
+          const titleEl = panel.querySelector('.wbpro-side-tit, header, h2, h3, .woo-box-item-flex');
+          const text = normalizeText(titleEl ? titleEl.textContent : panel.textContent);
+          if (!text) return;
+          if (!patterns.some(re => re.test(text))) return;
+
+          panel.setAttribute('yawf-hide-message-help', '');
+          panel.style.setProperty('display', 'none', 'important');
+        });
+      });
+    },
+  });
+  clean.CleanRule('feedback', () => i18n.cleanMessageFeedback, 1, {
+    acss: '#v6_pl_rightmod_feedback { display: none !important; }',
+    v7Support: true,
+    ainit() {
+      const rule = this;
+      observer.dom.add(function hideV7MessageFeedback() {
+        if (!rule.isEnabled()) return;
+        if (!document.querySelector('#app')) return;
+        if (!/^\/at\//.test(location.pathname || '')) return;
+
+        const patterns = [/微博意见反馈/, /微博意見反饋/, /意见反馈/, /意見反饋/, /feedback/i];
+        const root = document.querySelector('#__sidebar') || document.querySelector('main,[role="main"]') || document.body;
+        const panels = Array.from(root.querySelectorAll('.woo-panel-main,.wbpro-side'));
+        panels.forEach(panel => {
+          if (!(panel instanceof Element)) return;
+          if (panel.hasAttribute('yawf-hide-message-feedback')) return;
+          if (panel.querySelector('article')) return;
+
+          const titleEl = panel.querySelector('.wbpro-side-tit, header, h2, h3, .woo-box-item-flex');
+          const text = normalizeText(titleEl ? titleEl.textContent : panel.textContent);
+          if (!text) return;
+          if (!patterns.some(re => re.test(text))) return;
+
+          panel.setAttribute('yawf-hide-message-feedback', '');
+          panel.style.setProperty('display', 'none', 'important');
+        });
+      });
+    },
+  });
 
 }());
 //#endregion
@@ -13539,7 +15482,37 @@ body .WB_handle ul li { flex: 1 1 auto; float: none; width: auto; }
       });
     },
   });
-  clean.CleanRule('related_article', () => i18n.cleanOtherRelatedArticle, 1, '.WB_artical [node-type="recommend"] { display: none !important; }');
+  clean.CleanRule('related_article', () => i18n.cleanOtherRelatedArticle, 1, {
+    acss: '.WB_artical [node-type="recommend"] { display: none !important; }',
+    v7Support: true,
+    ainit() {
+      observer.dom.add(function hideV7RelatedArticleModule() {
+        const path = location.pathname || '';
+        if (!/ttarticle/i.test(path)) return;
+        const scope = document.querySelector('main') || document.body;
+        const panels = Array.from(scope.querySelectorAll([
+          '.woo-panel-main',
+          'article.woo-panel-main',
+          '.wbpro-side',
+        ].join(',')));
+        panels.forEach(panel => {
+          if (!(panel instanceof Element)) return;
+          if (panel.hasAttribute('yawf-hide-related-article')) return;
+          const titleEl = panel.querySelector('.wbpro-side-tit, header, h2, h3, .woo-box-item-flex');
+          const title = titleEl ? titleEl.textContent.replace(/[\u200b\r\n]+/g, '').trim() : '';
+          if (title && (title.includes('推荐阅读') || title.includes('推荐文章') || title.includes('推荐'))) {
+            panel.setAttribute('yawf-hide-related-article', '');
+            panel.style.setProperty('display', 'none', 'important');
+            return;
+          }
+          const hasArticleLink = !!panel.querySelector('a[href*=\"ttarticle/p/show\"],a[href*=\"ttarticle/p\"]');
+          if (!hasArticleLink) return;
+          panel.setAttribute('yawf-hide-related-article', '');
+          panel.style.setProperty('display', 'none', 'important');
+        });
+      });
+    },
+  });
   clean.CleanRule('send_weibo', () => i18n.cleanOtherSendWeibo, 1, {
     acss: '.send_weibo_simple { display: none !important; }',
     ref: { i: { type: 'bubble', icon: 'warn', template: () => i18n.cleanOtherSendWeiboDetail } },
@@ -13602,6 +15575,7 @@ body .WB_handle ul li { flex: 1 1 auto; float: none; width: auto; }
   };
 
   navbar.autoHide = rule.Rule({
+    v7Support: true,
     id: 'layout_nav_auto_hide',
     version: 1,
     parent: navbar.navbar,
@@ -13610,11 +15584,17 @@ body .WB_handle ul li { flex: 1 1 auto; float: none; width: auto; }
       const attr = 'yawf-navbar-autohide';
       const updateNavFloat = function () {
         const navs = document.querySelectorAll('.WB_global_nav');
-        if (!navs.length) return;
+        const v7Navs = document.querySelectorAll('[role="navigation"]');
+        if (!navs.length && !v7Navs.length) return;
         // 你能相信吗？导航栏不一定有一个。很神奇的呢
         const y = window.scrollY;
         Array.from(navs).forEach(function (nav) {
           const f = nav.hasAttribute(attr), r = 42;
+          if (y < r && f) nav.removeAttribute(attr);
+          if (y >= r && !f) nav.setAttribute(attr, '');
+        });
+        Array.from(v7Navs).forEach(function (nav) {
+          const f = nav.hasAttribute(attr), r = 56;
           if (y < r && f) nav.removeAttribute(attr);
           if (y >= r && !f) nav.setAttribute(attr, '');
         });
@@ -13634,6 +15614,17 @@ body .WB_handle ul li { flex: 1 1 auto; float: none; width: auto; }
 .WB_global_nav[${attr}]:hover .gn_topmenulist_tips .ficon_close { top: 6px; transition: top ease-in-out 0.1s 0s; }
 /* 浮动元素 */
 .W_fixed_top { top: 10px !important; }
+
+/* V7 */
+:root { --yawf-v7-nav-height: 56px; --yawf-v7-nav-reveal: 10px; }
+[role="navigation"] { transition: transform ease-in-out 0.12s; }
+[role="navigation"][${attr}] {
+  transform: translateY(calc(-1 * (var(--yawf-v7-nav-height) - var(--yawf-v7-nav-reveal))));
+}
+[role="navigation"][${attr}]:hover,
+[role="navigation"][${attr}]:focus-within {
+  transform: translateY(0);
+}
 `);
     },
   });
@@ -13650,6 +15641,7 @@ body .WB_handle ul li { flex: 1 1 auto; float: none; width: auto; }
   });
 
   navbar.oldLayout = rule.Rule({
+    v7Support: true,
     id: 'layout_nav_classical',
     version: 1,
     parent: navbar.navbar,
@@ -13658,6 +15650,39 @@ body .WB_handle ul li { flex: 1 1 auto; float: none; width: auto; }
       i: { type: 'bubble', icon: 'ask', template: () => i18n.reorderNavbarDetail },
     },
     ainit() {
+      // V7: move "首页/消息/游戏" links to the left of the search box (best-effort, DOM based)
+      const moveV7NavList = function moveV7NavList() {
+        const nav = document.querySelector('[role="navigation"]');
+        if (!nav) return;
+        if (nav.hasAttribute('yawf-nav-classical')) return;
+        const searchInput = nav.querySelector('input[placeholder*="搜索微博"],input[placeholder*="Search"],input[type="search"]');
+        if (!searchInput) return;
+        const searchWrap = searchInput.closest('div');
+        if (!searchWrap) return;
+
+        const links = Array.from(nav.querySelectorAll('a')).map(a => ({
+          a,
+          text: (a.textContent || '').replace(/[\s\u200b]+/g, ' ').trim(),
+        }));
+        const toMove = links.filter(({ text }) => ['首页', '消息', '游戏', '热门'].includes(text)).map(x => x.a);
+        if (!toMove.length) return;
+
+        const wrap = document.createElement('div');
+        wrap.className = 'yawf-v7-nav-classical-links';
+        toMove.forEach(a => {
+          try { a.parentNode && a.parentNode.removeChild(a); } catch (e) { /* ignore */ }
+          wrap.appendChild(a);
+        });
+        searchWrap.parentNode.insertBefore(wrap, searchWrap);
+        nav.setAttribute('yawf-nav-classical', '');
+        observer.dom.remove(moveV7NavList);
+      };
+      observer.dom.add(moveV7NavList);
+      css.append(`
+[role="navigation"] .yawf-v7-nav-classical-links { display: flex; align-items: center; gap: 14px; margin-right: 10px; }
+[role="navigation"] .yawf-v7-nav-classical-links a { white-space: nowrap; }
+`);
+
       const moveNavList = function moveNavList() {
         const search = document.querySelector('.WB_global_nav .gn_search, .WB_global_nav .gn_search_v2');
         const list = document.querySelector('.WB_global_nav .gn_header .gn_position .gn_nav .gn_nav_list');
@@ -13957,12 +15982,6 @@ body .WB_handle ul li { flex: 1 1 auto; float: none; width: auto; }
       i: { type: 'bubble', icon: 'warn', template: () => i18n.sidebarMergeDetail },
     },
     init() {
-      this.addConfigListener(newValue => {
-        if (!newValue) return;
-        if (!layout.scroll.scrollLeft.getConfig()) return;
-        if (!layout.scroll.scrollRight.getConfig()) return;
-        layout.scroll.scrollRight.setConfig(false);
-      });
       this.ref.side.addConfigListener(sidebarOn);
     },
     ainit: function mergeLeftRight() {
@@ -14137,11 +16156,12 @@ body .WB_handle ul li { flex: 1 1 auto; float: none; width: auto; }
     allSidebarOnRight: { cn: '右侧', tw: '右側', en: 'right side' },
   });
 
-  sidebar.allSidebarOn = rule.Rule({
-    id: 'layout_side_position',
-    version: 1,
-    parent: sidebar.sidebar,
-    template: () => i18n.allSidebarOn,
+	  sidebar.allSidebarOn = rule.Rule({
+	    v7Support: true,
+	    id: 'layout_side_position',
+	    version: 1,
+	    parent: sidebar.sidebar,
+	    template: () => i18n.allSidebarOn,
     ref: {
       side: {
         type: 'select',
@@ -14154,23 +16174,59 @@ body .WB_handle ul li { flex: 1 1 auto; float: none; width: auto; }
     init() {
       this.ref.side.addConfigListener(sidebarOn);
     },
-    ainit() {
-      const side = this.ref.side.getConfig();
-      observer.dom.add(function choseSideRunner() {
-        let b, c, p;
-        if (side === 'left') {
-          b = document.querySelector('#plc_main>.WB_frame_c:first-child+.WB_frame_b:last-child'); if (!b) return;
-          p = b.parentNode;
-          p.insertBefore(b, p.firstChild);
-        } else if (side === 'right') {
-          c = document.querySelector('#plc_main>.WB_frame_b:first-child+.WB_frame_c:last-child'); if (!c) return;
-          p = c.parentNode;
-          b = p.firstElementChild;
-          p.appendChild(b);
-        }
-      });
-    },
-  });
+	    ainit() {
+	      const side = this.ref.side.getConfig();
+	      observer.dom.add(function choseSideRunner() {
+	        let b, c, p;
+	        if (side === 'left') {
+	          b = document.querySelector('#plc_main>.WB_frame_c:first-child+.WB_frame_b:last-child'); if (!b) return;
+	          p = b.parentNode;
+	          p.insertBefore(b, p.firstChild);
+	        } else if (side === 'right') {
+	          c = document.querySelector('#plc_main>.WB_frame_b:first-child+.WB_frame_c:last-child'); if (!c) return;
+	          p = c.parentNode;
+	          b = p.firstElementChild;
+	          p.appendChild(b);
+	        }
+	      });
+
+	      // V7: reorder the main layout flex children so the sidebar appears on chosen side.
+		      observer.dom.add(function choseSideRunnerV7() {
+		        const sidebar = document.querySelector('#__sidebar');
+		        if (!sidebar) return;
+		        const sideWrap = sidebar.parentElement;
+		        const mainWrap = sideWrap && sideWrap.parentElement;
+		        if (!sideWrap || !mainWrap || mainWrap.tagName !== 'MAIN') return;
+		        const siblings = Array.from(mainWrap.children);
+		        if (siblings.length < 2) return;
+		        const fullWrap = siblings.find(el => el !== sideWrap) || null;
+		        if (!fullWrap) return;
+
+		        if (side === 'left') {
+		          sideWrap.style.setProperty('order', '0');
+		          fullWrap.style.setProperty('order', '1');
+		        } else if (side === 'right') {
+		          fullWrap.style.setProperty('order', '0');
+		          sideWrap.style.setProperty('order', '1');
+		        }
+
+		        // If all sidebar panels are hidden by clean rules, collapse the empty column to avoid a blank gap.
+		        const panels = Array.from(sidebar.querySelectorAll('.wbpro-side, .woo-panel-main'));
+		        const hasVisible = panels.some(p => {
+		          if (!(p instanceof Element)) return false;
+		          const style = getComputedStyle(p);
+		          if (style.display === 'none' || style.visibility === 'hidden') return false;
+		          const rect = p.getBoundingClientRect();
+		          return rect.width > 20 && rect.height > 20;
+		        });
+		        if (!hasVisible) {
+		          sideWrap.style.setProperty('display', 'none', 'important');
+		        } else {
+		          sideWrap.style.removeProperty('display');
+		        }
+		      });
+		    },
+		  });
 
   // 使用关键字、正则式和话题过滤热门话题模块
   // 这个功能没有做开关，因为关键字等都是用户自己设置的，相当于开关了
@@ -14229,193 +16285,6 @@ body .WB_handle ul li { flex: 1 1 auto; float: none; width: auto; }
         });
       }, util.inject.rootKey);
     },
-  });
-
-}());
-//#endregion
-//#region @require yaofang://content/rule/layout/scroll.js
-; (function () {
-
-  const yawf = window.yawf;
-  const util = yawf.util;
-  const rule = yawf.rule;
-  const observer = yawf.observer;
-
-  const layout = yawf.rules.layout;
-
-  const i18n = util.i18n;
-  const css = util.css;
-
-  const scroll = layout.scroll = {};
-
-  i18n.scrollToolGroupTitle = {
-    cn: '随页面滚动元素',
-    tw: '隨頁面捲動元素',
-    en: 'Elements Scroll with Page',
-  };
-
-  scroll.scroll = rule.Group({
-    parent: layout.layout,
-    template: () => i18n.scrollToolGroupTitle,
-  });
-
-  const scrollAfterMerge = (prefer = 'left') => () => {
-    if (!scroll.scrollLeft.getConfig()) return;
-    if (!scroll.scrollRight.getConfig()) return;
-    if (!layout.sidebar.merge.getConfig()) return;
-    if (prefer === 'left') {
-      scroll.scrollRight.setConfig(false);
-    } else {
-      scroll.scrollLeft.setConfig(false);
-    }
-  };
-
-  Object.assign(i18n, {
-    scrollLeft: { cn: '允许首页左边栏随页面滚动始终显示', tw: '允許首頁左邊欄隨頁面捲動始終顯示', en: 'Floating left column' },
-    scrollRight: { cn: '允许首页右边栏随页面滚动始终显示', tw: '允許首頁右邊欄隨頁面捲動始終顯示', en: 'Floating right column' },
-    scrollOthers: { cn: '允许其他元素随页面滚动始终显示', tw: '允許其他元素隨頁面捲動始終顯示', en: 'Floating other elements' },
-  });
-
-  scroll.scrollLeft = rule.Rule({
-    id: 'layout_left_move',
-    version: 1,
-    parent: scroll.scroll,
-    initial: true,
-    template: () => i18n.scrollLeft,
-    // 如果合并了左右边栏，那么左栏浮动的时候右栏不能浮动
-    init() {
-      this.addConfigListener(scrollAfterMerge('left'));
-    },
-    ainit() {
-      // 禁用左栏浮动的相关代码在禁用右边栏浮动的逻辑那里统一处理
-      // 如果合并了边栏，那么会因为禁用右栏浮动而同时禁用在右栏里面的左栏
-      // 这时候左栏如果还要浮动，那么就要重新让他动起来
-      // 这里的程序是为了让左栏再动起来的
-      if (!layout.sidebar.merge.getConfig()) return;
-      css.append(`
-.WB_main_r .WB_main_l { will-change: scroll-position; }
-.WB_main_r[yawf-fixed] .WB_main_l { position: fixed; top: 60px !important; overflow: hidden; height: auto !important; width: 150px; }
-body[yawf-merge-left] .WB_main_r[yawf-fixed] .WB_main_l { width: 229px; }
-`);
-      if (layout.navbar.autoHide.getConfig()) {
-        util.css.append('.WB_main_r[yawf-fixed] .WB_main_l { top: 10px !important; }');
-      }
-
-      // 限制左栏最大高度，避免超出中间区域
-      const updateMaxHeight = function (left, maxHeight) {
-        const none = maxHeight == null;
-        const text = none ? 'none' : maxHeight + 'px';
-        const srl = left.querySelector('[node-type="leftnav_scroll"]');
-        if (!srl) return;
-        if ((left.style.maxHeight || 'none') !== text) {
-          left.style.maxHeight = text;
-          if (none) srl.setAttribute('style', '');
-          else {
-            const lev = Array.from(srl.querySelectorAll('.lev_Box'));
-            const ch = lev.map(lb => lb.clientHeight).reduce((x, y) => x + y);
-            const height = Math.min(maxHeight - srl.offsetTop, ch) + 'px';
-            if (srl.style.height !== height) {
-              srl.style.height = height;
-              srl.style.position = 'relative';
-            }
-          }
-        }
-      };
-
-      // 每当滚动滚动条或调整窗口大小时，更新左栏状态
-      let hasScroll = false;
-      const updateLeftPosition = function updateLeftPosition() {
-        const left = document.querySelector('.yawf-WB_left_nav');
-        const reference = document.querySelector('.WB_main_r');
-        const container = document.querySelector('#plc_main');
-        if (!left || !reference) return;
-        const refc = reference.getClientRects();
-        if (!refc?.[0]) return;
-        const pos = refc[0];
-        if (!hasScroll) {
-          if (pos.bottom < -60) {
-            hasScroll = true;
-            reference.setAttribute('yawf-fixed', '');
-          }
-        } else {
-          if (pos.bottom + left.clientHeight > 60) {
-            hasScroll = false;
-            reference.removeAttribute('yawf-fixed');
-          }
-        }
-        if (hasScroll) {
-          const cip = container.getClientRects()[0];
-          const fip = left.getClientRects()[0];
-          const no_space = false; // filter.items.style.sweibo.no_weibo_space.conf;
-          const maxHeightBottom = cip.bottom - fip.top + (no_space ? 0 : -10);
-          const maxHeight = Math.max(Math.min(maxHeightBottom, window.innerHeight - 80), 0);
-          if (cip && fip) updateMaxHeight(left, maxHeight);
-        } else { updateMaxHeight(left); }
-      };
-
-      document.addEventListener('scroll', updateLeftPosition);
-      window.addEventListener('resize', updateLeftPosition);
-      observer.dom.add(updateLeftPosition);
-    },
-  });
-
-  scroll.scrollRight = rule.Rule({
-    id: 'layout_right_move',
-    version: 1,
-    parent: scroll.scroll,
-    initial: true,
-    template: () => i18n.scrollRight,
-    init() {
-      this.addConfigListener(scrollAfterMerge('right'));
-
-      const merge = layout.sidebar.merge.getConfig();
-      const fleft = scroll.scrollLeft.getConfig();
-      const fright = scroll.scrollRight.getConfig();
-      const fother = scroll.scrollOthers.getConfig();
-      const itemAttrs = ['fixed-item', 'fixed-box'];
-      const containerAttrs = ['fixed-inbox', 'fixed-id'];
-      const withIn = [];
-      const queryString = function (classNames, attributes) {
-        return classNames.map(className => (
-          attributes.map(attribute => `${className} [${attribute}]`).join(',')
-        )).join(',');
-      };
-      if (!fright) withIn.push('.WB_main_r');
-      if (!fleft || merge) withIn.push('.WB_main_l');
-      if (!fother) { withIn.push('.WB_frame_b', '.WB_frame_c'); }
-      if (withIn.length === 0) return;
-
-      const removeFixed = function removeFixed() {
-        const itemQuery = queryString(withIn, itemAttrs);
-        const items = Array.from(document.querySelectorAll(itemQuery));
-        items.forEach(function (fixed) {
-          const cloned = fixed.cloneNode(true);
-          itemAttrs.forEach(attr => { cloned.removeAttribute(attr); });
-          fixed.replaceWith(cloned);
-        });
-        const containerQuery = queryString(withIn, containerAttrs);
-        const containers = Array.from(document.querySelectorAll(containerQuery));
-        containers.forEach(function (container) {
-          const cloned = container.cloneNode(true);
-          containerAttrs.forEach(function (attr) { cloned.removeAttribute(attr); });
-          const parent = container.parentNode;
-          const prev = parent.previousElementSibling;
-          const hadWraped = parent.style.willChange && prev && prev.innerHTML === '';
-          const replaceTarget = hadWraped ? parent : container;
-          if (hadWraped) prev.remove();
-          replaceTarget.replaceWith(cloned);
-        });
-      };
-      observer.dom.add(removeFixed);
-    },
-  });
-
-  scroll.scrollOthers = rule.Rule({
-    id: 'layout_other_move',
-    version: 1,
-    parent: scroll.scroll,
-    template: () => i18n.scrollOthers,
-    initial: true,
   });
 
 }());
@@ -14950,6 +16819,22 @@ body[yawf-merge-left] .WB_main_r[yawf-fixed] .WB_main_l { width: 229px; }
             element.setAttribute('yawf-date-format', 'year');
             updateDate(element);
           });
+
+          // V7: timestamps are links with an absolute datetime in `title`.
+          // Apply the same `yawf-date` pipeline so `feed_absolute_time` works on V7,
+          // including the cloned timestamp inserted by `feed_source_at_bottom`.
+          if (!document.querySelector('#app[data-v-app]')) return;
+          if (!(feed instanceof Element) || feed.tagName !== 'ARTICLE') return;
+          const links = Array.from(feed.querySelectorAll('a[title]:not([yawf-date])'));
+          links.forEach(link => {
+            const title = link.getAttribute('title');
+            if (!title) return;
+            const parsed = util.time.parse(title);
+            if (!parsed) return;
+            link.setAttribute('yawf-date', +parsed);
+            link.setAttribute('yawf-date-format', 'year');
+            updateDate(link);
+          });
         });
       }
 
@@ -15163,26 +17048,30 @@ body[yawf-merge-left] .WB_main_r[yawf-fixed] .WB_main_l { width: 229px; }
     en: 'Hide Topics in Hot Topics | with {{quota}}00 million reading counts',
   };
 
-  layout.hideHotTopicLargeRead = rule.Rule({
-    id: 'hide_hot_topic_large_read',
-    version: 65,
-    parent: details.details,
-    template: () => i18n.hideHotTopicLargeRead,
-    ref: {
+	  layout.hideHotTopicLargeRead = rule.Rule({
+	    v7Support: true,
+	    id: 'hide_hot_topic_large_read',
+	    version: 65,
+	    parent: details.details,
+	    template: () => i18n.hideHotTopicLargeRead,
+	    ref: {
       quota: {
         type: 'range',
         min: 1,
         max: 100,
         initial: 20,
       },
-    },
-    async ainit() {
-      util.css.add('.hot_topic li[yawf-rtopic-count="hidden"], #topicAD { display: none !important; }');
-      let that = this;
-      observer.dom.add(function filteRightTopicCount() {
-        let counts = Array.from(document.querySelectorAll('.hot_topic li:not([yawf-rtopic-count]) .total'));
-        counts.forEach(function (count) {
-          // 网站中数字由 xxx万 ， xx.x亿 的方式表示；且没有繁体或英文版本
+	    },
+	    async ainit() {
+	      util.css.add([
+	        '.hot_topic li[yawf-rtopic-count="hidden"], #topicAD { display: none !important; }',
+	        '#__sidebar [yawf-rtopic-count="hidden"] { display: none !important; }',
+	      ].join('\n'));
+	      let that = this;
+	      observer.dom.add(function filteRightTopicCount() {
+	        let counts = Array.from(document.querySelectorAll('.hot_topic li:not([yawf-rtopic-count]) .total'));
+	        counts.forEach(function (count) {
+	          // 网站中数字由 xxx万 ， xx.x亿 的方式表示；且没有繁体或英文版本
           // 注意有时前面的数字会有小数点，所以要替换为 e4, e8 而非 0000, 00000000
           const number = strings.parseint(count.textContent);
           const li = count.closest('li');
@@ -15190,11 +17079,46 @@ body[yawf-merge-left] .WB_main_r[yawf-fixed] .WB_main_l { width: 229px; }
             li.setAttribute('yawf-rtopic-count', 'hidden');
           } else {
             li.setAttribute('yawf-rtopic-count', 'show');
-          }
-        });
-      });
-    },
-  });
+	          }
+	        });
+
+	        // V7 best-effort: find Hot Search / Hot Topic panel in right sidebar and hide rows by count text.
+	        const sidebar = document.querySelector('#__sidebar');
+	        if (!sidebar) return;
+	        const panels = Array.from(sidebar.querySelectorAll('.wbpro-side, .woo-panel-main'));
+	        if (!panels.length) return;
+	        const panel = panels.find(p => {
+	          const tit = p.querySelector('.wbpro-side-tit');
+	          const title = (tit ? tit.textContent : p.textContent || '').replace(/[\u200b\r\n]+/g, ' ').replace(/[ \t]+/g, ' ').trim();
+	          return title && (title.includes('热搜') || title.includes('热门话题'));
+	        });
+	        if (!panel) return;
+
+	        const countLike = function (text) {
+	          const t = String(text || '').replace(/[\u200b\r\n]+/g, ' ').replace(/[ \t]+/g, ' ').trim();
+	          if (!t) return false;
+	          // Reading counts often look like: "123万" or "1.2亿"
+	          return /[0-9]/.test(t) && /[万亿]/.test(t);
+	        };
+
+	        const candidates = Array.from(panel.querySelectorAll('span, em, i, small, div'))
+	          .filter(el => el instanceof Element && el.childElementCount === 0 && !el.hasAttribute('yawf-rtopic-count-checked'))
+	          .filter(el => countLike(el.textContent));
+
+	        candidates.forEach(function (count) {
+	          count.setAttribute('yawf-rtopic-count-checked', '1');
+	          const number = strings.parseint(count.textContent);
+	          const row = count.closest('li,[role="listitem"],a') || count.parentElement;
+	          if (!row || row === panel) return;
+	          if (Number.isNaN(number) || that.ref.quota.getConfig() * 1e8 <= number) {
+	            row.setAttribute('yawf-rtopic-count', 'hidden');
+	          } else {
+	            row.setAttribute('yawf-rtopic-count', 'show');
+	          }
+	        });
+	      });
+	    },
+	  });
 
 }());
 //#endregion
@@ -15345,12 +17269,13 @@ body[yawf-merge-left] .WB_main_r[yawf-fixed] .WB_main_l { width: 229px; }
     en: 'Dark theme navbar',
   };
 
-  theme.darkNav = rule.Rule({
-    id: 'layout_nav_dark',
-    version: 1,
-    parent: theme.theme,
-    template: () => i18n.navbarDark,
-    acss: `
+	  theme.darkNav = rule.Rule({
+	    v7Support: true,
+	    id: 'layout_nav_dark',
+	    version: 1,
+	    parent: theme.theme,
+	    template: () => i18n.navbarDark,
+	    acss: `
 .WB_global_nav { background: #333; }
 .WB_global_nav_alpha { background: rgba(51, 51, 51, 0.94); }
 .gn_logo .logo:empty { background: none !important; }
@@ -15363,9 +17288,37 @@ body[yawf-merge-left] .WB_main_r[yawf-fixed] .WB_main_l { width: 229px; }
 .gn_logo .logo:empty::after { filter: url("data:image/svg+xml,%3Csvg%20viewBox=%220%200%20183%20276%22%20id=%22img3%22%20xmlns=%22http://www.w3.org/2000/svg%22%3E%3Cfilter%20id=%22invert%22%3E%3CfeComponentTransfer%3E%3CfeFuncR%20tableValues=%221%200%22%20type=%22table%22/%3E%3CfeFuncG%20tableValues=%221%200%22%20type=%22table%22/%3E%3CfeFuncB%20tableValues=%221%200%22%20type=%22table%22/%3E%3C/feComponentTransfer%3E%3C/filter%3E%3C/svg%3E#invert"); filter: invert(100%); }
 .FRAME_main .WB_global_nav .gn_nav_list li .home em { color: #fa7d3c; }
 .WB_global_nav .S_ficon, .WB_global_nav .S_ficon_dis, .WB_global_nav a.S_ficon_dis:hover, .WB_global_nav a:hover .S_ficon_dis { color: #a6afbf; }
-.WB_global_nav .S_txt1, .WB_global_nav .SW_fun .S_func1 { color: #eee; }
-`,
-  });
+	.WB_global_nav .S_txt1, .WB_global_nav .SW_fun .S_func1 { color: #eee; }
+	`,
+		    ainit() {
+		      // V7: mark the top bar container and apply scoped dark styles.
+		      observer.dom.add(function yawfV7DarkNav() {
+		        const input = document.querySelector('input[placeholder="搜索微博"], input[placeholder*="搜索微博"]');
+		        if (!input) return;
+		        const bar = input.closest('.woo-panel-main') || input.closest('header') || input.closest('div');
+		        if (!bar) return;
+		        const theme = (document.documentElement.getAttribute('data-theme') || '').toLowerCase();
+		        // Avoid fighting Weibo's own night mode on V7.
+		        if (theme === 'dark') {
+		          if (bar.hasAttribute('yawf-v7-top-nav')) bar.removeAttribute('yawf-v7-top-nav');
+		          return;
+		        }
+		        if (!bar.hasAttribute('yawf-v7-top-nav')) bar.setAttribute('yawf-v7-top-nav', '');
+		      });
+
+		      css.append(`
+		html[data-theme="light"] [yawf-v7-top-nav] { background: #333 !important; color: #eee !important; }
+		html[data-theme="light"] [yawf-v7-top-nav] a { color: inherit !important; }
+		html[data-theme="light"] [yawf-v7-top-nav] button { color: inherit !important; background: rgba(255, 255, 255, 0.08) !important; border: 1px solid rgba(255, 255, 255, 0.12) !important; }
+		html[data-theme="light"] [yawf-v7-top-nav] button:hover { background: rgba(255, 255, 255, 0.14) !important; }
+		html[data-theme="light"] [yawf-v7-top-nav] .woo-input-wrap { background: rgba(255, 255, 255, 0.08) !important; }
+		html[data-theme="light"] [yawf-v7-top-nav] input.woo-input-main { color: inherit !important; background: transparent !important; }
+		html[data-theme="light"] [yawf-v7-top-nav] input.woo-input-main::placeholder { color: rgba(238, 238, 238, 0.7) !important; }
+		html[data-theme="light"] [yawf-v7-top-nav] .woo-pop-wrap-main { background: rgba(51, 51, 51, 0.98) !important; color: #eee !important; border: 1px solid rgba(255, 255, 255, 0.12) !important; }
+		html[data-theme="light"] [yawf-v7-top-nav] .woo-pop-wrap-main * { color: #eee !important; }
+		`);
+		    },
+		  });
 
   i18n.colorOverride = {
     cn: '修改网页配色（半透明背景）||主背景色{{color2}}|透明度{{transparency2}}%||副背景色{{color1}}|透明度{{transparency1}}%||输入框背景色{{color3}}|透明度{{transparency3}}%',
@@ -15373,12 +17326,13 @@ body[yawf-merge-left] .WB_main_r[yawf-fixed] .WB_main_l { width: 229px; }
     en: 'Change colors on page (Semi-transparent background) || Primary Background Color {{color2}} | transparency {{transparency2}}% || Secondary Background Color {{color1}} | transparency {{transparency1}}% || Input box {{color3}} | transparency {{transparency3}}%',
   };
 
-  theme.color = rule.Rule({
-    id: 'layout_theme_color',
-    version: 1,
-    parent: theme.theme,
-    template: () => i18n.colorOverride,
-    ref: {
+	  theme.color = rule.Rule({
+	    v7Support: true,
+	    id: 'layout_theme_color',
+	    version: 1,
+	    parent: theme.theme,
+	    template: () => i18n.colorOverride,
+	    ref: {
       color1: { type: 'color', initial: '#f6f6f6' },
       transparency1: { type: 'range', min: 0, max: 100, initial: 30 },
       color2: { type: 'color', initial: '#ffffff' },
@@ -15386,22 +17340,173 @@ body[yawf-merge-left] .WB_main_r[yawf-fixed] .WB_main_l { width: 229px; }
       color3: { type: 'color', initial: '#ffffff' },
       transparency3: { type: 'range', min: 0, max: 100, initial: 30 },
     },
-    ainit() {
-      const colorStr = (color, transparency) => color + (256 | 255 * (1 - transparency / 100)).toString(16).slice(-2);
-      const color1 = colorStr(this.ref.color1.getConfig(), this.ref.transparency1.getConfig());
-      const color2 = colorStr(this.ref.color2.getConfig(), this.ref.transparency2.getConfig());
-      const color3 = colorStr(this.ref.color3.getConfig(), this.ref.transparency3.getConfig());
-      const notes = colorStr('#fff8bf', Math.round(100 - (100 - this.ref.transparency1.getConfig()) ** 3 / 1e4));
-      css.append(`
-body .S_bg1, body .SW_fun_bg:hover, body .SW_fun_bg_active { background-color: ${color1}; }
-body .S_bg2, body blockquote, body .W_btn_b, body .W_input, body .SW_fun_bg { background-color: ${color2}; }
-body .S_bg1_br { border-color: ${color1}; }
-body .S_bg2_br { border-color: ${color2}; }
-body .W_input, body .send_weibo .input { background-color: ${color3}; }
+		    ainit() {
+		      const colorStr = (color, transparency) => color + (256 | 255 * (1 - transparency / 100)).toString(16).slice(-2);
+		      const rgbaStr = function (color, transparency) {
+		        const hex = String(color || '').replace('#', '').trim();
+		        if (!/^[0-9a-fA-F]{6}$/.test(hex)) return String(color || '');
+		        const r = parseInt(hex.slice(0, 2), 16);
+		        const g = parseInt(hex.slice(2, 4), 16);
+		        const b = parseInt(hex.slice(4, 6), 16);
+		        const a = Math.max(0, Math.min(1, 1 - Number(transparency) / 100));
+		        return `rgba(${r}, ${g}, ${b}, ${a})`;
+		      };
+		      const rgbTuple = function (color) {
+		        const hex = String(color || '').replace('#', '').trim();
+		        if (!/^[0-9a-fA-F]{6}$/.test(hex)) return null;
+		        const r = parseInt(hex.slice(0, 2), 16);
+		        const g = parseInt(hex.slice(2, 4), 16);
+		        const b = parseInt(hex.slice(4, 6), 16);
+		        return [r, g, b];
+		      };
+		      const blendRgb = function (fgRgb, alpha, bgRgb) {
+		        if (!fgRgb || !bgRgb) return null;
+		        const a = Math.max(0, Math.min(1, Number(alpha)));
+		        const r = Math.round(fgRgb[0] * a + bgRgb[0] * (1 - a));
+		        const g = Math.round(fgRgb[1] * a + bgRgb[1] * (1 - a));
+		        const b = Math.round(fgRgb[2] * a + bgRgb[2] * (1 - a));
+		        return [r, g, b];
+		      };
+		      const rgbStr = function (rgb) {
+		        if (!rgb) return '';
+		        return `rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})`;
+		      };
+		      const color1 = colorStr(this.ref.color1.getConfig(), this.ref.transparency1.getConfig());
+		      const color2 = colorStr(this.ref.color2.getConfig(), this.ref.transparency2.getConfig());
+		      const color3 = colorStr(this.ref.color3.getConfig(), this.ref.transparency3.getConfig());
+		      const notes = colorStr('#fff8bf', Math.round(100 - (100 - this.ref.transparency1.getConfig()) ** 3 / 1e4));
 
-.S_bg2 .private_list.SW_fun_bg:not(.cur),
-.WB_tab_a .tab .S_bg2 .S_bg2,
-.S_bg2 .WB_webim_page .webim_contacts_mod
+		      // V7: prefer rgba() for broad compatibility and to preserve transparency.
+		      const v7Color1 = rgbaStr(this.ref.color1.getConfig(), this.ref.transparency1.getConfig());
+		      const v7Color2 = rgbaStr(this.ref.color2.getConfig(), this.ref.transparency2.getConfig());
+		      const v7Color3 = rgbaStr(this.ref.color3.getConfig(), this.ref.transparency3.getConfig());
+		      // V7: some sticky bars appear to blend against an unexpected backdrop (white),
+		      // so pre-blend card color over page color as an opaque fallback for those bars.
+		      const v7Color1Rgb = rgbTuple(this.ref.color1.getConfig());
+		      const v7Color2Rgb = rgbTuple(this.ref.color2.getConfig());
+		      const v7Color2Alpha = Math.max(0, Math.min(1, 1 - Number(this.ref.transparency2.getConfig()) / 100));
+		      const v7Color2OnColor1 = rgbStr(blendRgb(v7Color2Rgb, v7Color2Alpha, v7Color1Rgb)) || v7Color2;
+
+		      observer.dom.add(function yawfV7ThemeColorMarker() {
+		        if (!document.querySelector('#app[data-v-app]')) return;
+		        document.documentElement.setAttribute('yawf-v7-theme-color', '');
+		      });
+
+		      // V7: detail pages contain extra "返回/公开" bars that may have hard-coded white backgrounds.
+		      // Patch them in DOM to keep visual consistency with configured colors.
+		      observer.dom.add(function yawfV7ThemeColorFixBars() {
+		        const de = document.documentElement;
+		        const theme = (de.getAttribute('data-theme') || '').toLowerCase();
+		        if (theme !== 'light') return;
+		        if (!de.hasAttribute('yawf-v7-theme-color')) return;
+		        const main = document.querySelector('main,[role="main"]');
+		        if (!main) return;
+
+		        const all = Array.from(main.querySelectorAll('*'));
+		        // "返回" sticky bar
+		        const sticky = all.find(el => {
+		          const cs = getComputedStyle(el);
+		          if (cs.position !== 'sticky' && cs.position !== '-webkit-sticky') return false;
+		          const text = (el.innerText || '').replace(/[\u200b\r\n]+/g, ' ').replace(/[ \t]+/g, ' ').trim();
+		          return text.includes('返回');
+		        });
+		        if (sticky) {
+		          // Ensure the sticky area blends the same way as the rest of the page:
+		          // put the page background (v7Color1) on the sticky wrapper, and the card background (v7Color2)
+		          // on the inner bar row, so the apparent color matches feed cards even with alpha colors.
+		          sticky.style.setProperty('background-color', v7Color1, 'important');
+		          sticky.style.setProperty('background', v7Color1, 'important');
+		          const bar = sticky.firstElementChild;
+		          if (bar) bar.style.setProperty('background-color', v7Color2OnColor1, 'important');
+		          Array.from(sticky.children).forEach(child => {
+		            if (!(child instanceof Element)) return;
+		            if (child === bar) return;
+		            child.style.setProperty('background-color', 'transparent', 'important');
+		          });
+		        }
+
+		        // "公开" badge row in detail page: remove the white strip.
+		        const pub = all.find(el => (el.textContent || '').trim() === '公开');
+		        if (pub) {
+		          // Make the smallest non-transparent/white wrapper transparent so it inherits the card background.
+		          let target = pub;
+		          for (let i = 0; i < 6 && target; i++) {
+		            const cs = getComputedStyle(target);
+		            const rect = target.getBoundingClientRect();
+		            const isWhite = cs.backgroundColor === 'rgb(255, 255, 255)' || cs.backgroundColor === 'rgba(255, 255, 255, 1)';
+		            const isStrip = rect.height > 0 && rect.height <= 80 && rect.width >= 200;
+		            if ((isWhite || cs.backgroundColor !== 'rgba(0, 0, 0, 0)') && isStrip) {
+		              target.style.setProperty('background-color', 'transparent', 'important');
+		              break;
+		            }
+		            target = target.parentElement;
+		          }
+		        }
+		      });
+
+		      // V7: patch detail wrappers / comment area / left group panel.
+		      observer.dom.add(function yawfV7ThemeColorPatchPanels() {
+		        const de = document.documentElement;
+		        const theme = (de.getAttribute('data-theme') || '').toLowerCase();
+		        if (theme !== 'light') return;
+		        if (!de.hasAttribute('yawf-v7-theme-color')) return;
+		        if (!document.querySelector('#app[data-v-app]')) return;
+
+		        // Left groups panel: the panel containing "最新微博" etc.
+		        const latest = Array.from(document.querySelectorAll('a')).find(a => (a.innerText || '').trim() === '最新微博');
+		        if (latest) {
+		          const panel = latest.closest('.woo-panel-main');
+		          // Avoid the top nav bar (also uses .woo-panel-main) by excluding those marked by nav-dark rule.
+		          if (panel && !panel.hasAttribute('yawf-v7-top-nav')) {
+		            panel.style.setProperty('background-color', v7Color2, 'important');
+		          }
+		        }
+
+		        // Detail/comment wrapper: make the wrapper match card background, and remove inner gray blocks.
+		        const forms = Array.from(document.querySelectorAll('.wbpro-form'));
+		        forms.forEach(form => {
+		          if (!(form instanceof Element)) return;
+		          const wrapper = form.closest('.woo-panel-main');
+		          if (wrapper) {
+		            wrapper.style.setProperty('background-color', v7Color2, 'important');
+		            // Prevent nested card alpha stacking: keep inner panels transparent and let wrapper show through.
+		            const innerPanels = Array.from(wrapper.querySelectorAll('.woo-panel-main, article.woo-panel-main'));
+		            innerPanels.forEach(p => {
+		              if (!(p instanceof Element)) return;
+		              if (p === wrapper) return;
+		              p.style.setProperty('background-color', 'transparent', 'important');
+		            });
+		          }
+		          // Remove default gray background on the comment form container itself.
+		          form.style.setProperty('background-color', 'transparent', 'important');
+		        });
+		      });
+		      css.append(`
+	body .S_bg1, body .SW_fun_bg:hover, body .SW_fun_bg_active { background-color: ${color1}; }
+	body .S_bg2, body blockquote, body .W_btn_b, body .W_input, body .SW_fun_bg { background-color: ${color2}; }
+	body .S_bg1_br { border-color: ${color1}; }
+	body .S_bg2_br { border-color: ${color2}; }
+	body .W_input, body .send_weibo .input { background-color: ${color3}; }
+
+			/* V7 best-effort mapping */
+			html[data-theme="light"][yawf-v7-theme-color] { background-color: ${v7Color1} !important; }
+			html[data-theme="light"][yawf-v7-theme-color] body,
+			html[data-theme="light"][yawf-v7-theme-color] #app[data-v-app],
+			html[data-theme="light"][yawf-v7-theme-color] #app:not([data-v-app]),
+			html[data-theme="light"][yawf-v7-theme-color] #app:not([data-v-app]) > .woo-box-flex.woo-box-column { background-color: ${v7Color1} !important; }
+			/* Avoid double-stacking opacity: only paint actual feed cards, not every woo-panel-main wrapper. */
+			html[data-theme="light"][yawf-v7-theme-color] #app[data-v-app] main article.woo-panel-main,
+			html[data-theme="light"][yawf-v7-theme-color] #app[data-v-app] #__sidebar .wbpro-side,
+			html[data-theme="light"][yawf-v7-theme-color] #app[data-v-app] #__sidebar .woo-panel-main { background-color: ${v7Color2} !important; }
+			html[data-theme="light"][yawf-v7-theme-color] #app[data-v-app] main article .retweet { background-color: ${v7Color1} !important; }
+			/* Inputs: apply to content area only (avoid tinting top search box). */
+			html[data-theme="light"][yawf-v7-theme-color] #app[data-v-app] main input.woo-input-main,
+			html[data-theme="light"][yawf-v7-theme-color] #app[data-v-app] main textarea,
+			html[data-theme="light"][yawf-v7-theme-color] #app[data-v-app] main [contenteditable="true"] { background-color: ${v7Color3} !important; }
+		    
+		.S_bg2 .private_list.SW_fun_bg:not(.cur),
+		.WB_tab_a .tab .S_bg2 .S_bg2,
+		.S_bg2 .WB_webim_page .webim_contacts_mod
 { background-color: transparent; }
 
 .WB_notes { background-color: ${notes} }
@@ -16165,6 +18270,7 @@ body .W_input, body .send_weibo .input { background-color: ${color3}; }
   };
 
   layout.foldSpace = rule.Rule({
+    v7Support: true,
     id: 'feed_no_space',
     version: 1,
     parent: layout.layout,
@@ -16188,6 +18294,10 @@ body .W_input, body .send_weibo .input { background-color: ${color3}; }
 .WB_feed_comment.WB_feed_comment .WB_feed_detail { position: relative; padding-bottom: 4px; }
 .WB_feed_comment.WB_feed_comment .WB_feed_detail::after { display: none; }
 .WB_feed_v3 .WB_expand .WB_empty .WB_innerwrap, .WB_feed_comment .WB_expand { margin-bottom: 0; }
+
+/* V7 */
+#app[data-v-app] main article.woo-panel-main { margin-bottom: 0 !important; border-radius: 0 !important; }
+#app[data-v-app] main article.woo-panel-main + article.woo-panel-main { border-top: 1px solid rgba(0, 0, 0, 0.08) !important; }
 `,
   });
 
@@ -16198,11 +18308,80 @@ body .W_input, body .send_weibo .input { background-color: ${color3}; }
   };
 
   layout.sourceAtBottom = rule.Rule({
+    v7Support: true,
     id: 'feed_source_at_bottom',
     version: 1,
     parent: layout.layout,
     template: () => i18n.sourceAtBottom,
     ainit() {
+      // V7 (best-effort): clone time + source to bottom (before toolbar), hide original
+      if (document.querySelector('#app[data-v-app]')) {
+        css.append(`
+.yawf-v7-feed-src-bottom { display: flex; gap: 10px; justify-content: flex-end; align-items: center; margin-top: 10px; font-size: 12px; opacity: .75; }
+.yawf-v7-feed-src-bottom a { color: inherit; }
+`);
+        observer.dom.add(function moveV7FeedSourceToBottom() {
+          const articles = Array.from(document.querySelectorAll('main article'));
+          articles.forEach(article => {
+            if (!(article instanceof Element)) return;
+            if (article.hasAttribute('yawf-v7-src-bottom')) return;
+            const header = article.querySelector('header');
+            if (!header) return;
+
+            const timeLink = header.querySelector('a[class*="_time_"][title][href*="weibo.com/"]') || header.querySelector('a[title][href*="weibo.com/"]');
+            const sourceNode = header.querySelector('div[class*="_source_"][title^="来自"]') || header.querySelector('div[title^="来自"]');
+            if (!timeLink || !sourceNode) return;
+
+            // Find the outer (top-level) toolbar container by icon titles.
+            // Retweets may include an inner "retweet bar" inside the forwarded card; avoid inserting there.
+            const iconSel = 'i[title="转发"],i[title="评论"],i[title="赞"],i[title="Comment"],i[title="Like"]';
+            const icons = Array.from(article.querySelectorAll(iconSel));
+            if (!icons.length) return;
+
+            const candidates = new Set();
+            const findToolbar = function (icon) {
+              let el = icon;
+              for (let i = 0; i < 10 && el; i++) {
+                el = el.parentElement;
+                if (!el || !el.querySelectorAll) break;
+                if (el.closest('article') !== article) continue;
+                const count = el.querySelectorAll(iconSel).length;
+                if (count >= 2) return el;
+              }
+              return null;
+            };
+            icons.forEach(icon => {
+              const tb = findToolbar(icon);
+              if (tb) candidates.add(tb);
+            });
+            const toolbars = Array.from(candidates);
+            if (!toolbars.length) return;
+
+            const isInnerRetweetBar = el => !!(el && el.closest && el.closest('[class*="retweetBar"]'));
+            const primary = toolbars.filter(tb => !isInnerRetweetBar(tb));
+            const pickFrom = primary.length ? primary : toolbars;
+            pickFrom.sort((a, b) => b.getBoundingClientRect().top - a.getBoundingClientRect().top);
+            const toolbar = pickFrom[0];
+
+            const wrap = document.createElement('div');
+            wrap.className = 'yawf-v7-feed-src-bottom';
+            wrap.appendChild(timeLink.cloneNode(true));
+            wrap.appendChild(sourceNode.cloneNode(true));
+            if (toolbar && toolbar.parentNode) {
+              toolbar.parentNode.insertBefore(wrap, toolbar);
+            } else {
+              article.appendChild(wrap);
+            }
+
+            timeLink.style.setProperty('display', 'none', 'important');
+            sourceNode.style.setProperty('display', 'none', 'important');
+
+            article.setAttribute('yawf-v7-src-bottom', '');
+          });
+        });
+        return;
+      }
+
       observer.dom.add(function () {
         const fromList = Array.from(document.querySelectorAll('.WB_detail > .WB_info + .WB_from'));
         if (!fromList.length) return;
@@ -16235,6 +18414,7 @@ body .W_input, body .send_weibo .input { background-color: ${color3}; }
   });
 
   layout.nowrapAfterAuthor = rule.Rule({
+    v7Support: true,
     id: 'feed_author_content_nowrap',
     version: 1,
     parent: layout.layout,
@@ -16264,7 +18444,51 @@ body .WB_feed_v3 .WB_face .opt.opt .W_btn_b { width: 48px; }
 
 .WB_feed.WB_feed_v3 .WB_info .sp_kz, 
 .WB_feed.WB_feed_v3 .WB_info .W_autocut { vertical-align: top; }
+
+/* V7: compact original-author + content line inside repost blocks (best-effort) */
+/* Keep inline flow (avoid flex two-column layout for multi-line text). */
+:is(#app[data-v-app], #app, #homeWrap, main) .retweet :is(.wbpro-feed-reText, .wbpro-feed-ogText) > :first-child {
+  display: contents !important;
+}
+:is(#app[data-v-app], #app, #homeWrap, main) .retweet :is(.wbpro-feed-reText, .wbpro-feed-ogText) > :first-child .woo-box-flex {
+  display: inline-flex !important;
+  align-items: baseline !important;
+  margin-right: 0.25em;
+}
+:is(#app[data-v-app], #app, #homeWrap, main) .retweet :is(.wbpro-feed-reText, .wbpro-feed-ogText) > [class*="_wbtext_"] {
+  display: inline !important;
+}
+
+/* Fallback for YAWF-rendered nodes (if enabled) */
+#app[data-v-app] .yawf-feed-detail > .yawf-feed-original-box,
+#app[data-v-app] .yawf-feed-detail > .yawf-feed-detail-content { display: inline !important; }
+#app[data-v-app] .yawf-feed-detail > .yawf-feed-original-box::after { content: "："; }
 `);
+
+      // V7: force retweet @author and text to stay on the same line (CSS alone can be overridden by Weibo hot updates).
+      observer.dom.add(function yawfV7NoWrapRetweetAuthorLine() {
+        const root = document.querySelector('#app, #homeWrap, main');
+        if (!root) return;
+        const blocks = Array.from(root.querySelectorAll('.retweet .wbpro-feed-reText, .retweet .wbpro-feed-ogText'));
+        blocks.forEach(block => {
+          if (!(block instanceof Element)) return;
+          if (block.hasAttribute('yawf-v7-nowrap-retweet')) return;
+          // Expected structure: [authorBlock, textBlock(_wbtext_), ...]
+          const authorBlock = block.firstElementChild;
+          const textBlock = block.querySelector(':scope > [class*="_wbtext_"]');
+          if (!authorBlock || !textBlock) return;
+
+          block.setAttribute('yawf-v7-nowrap-retweet', '');
+          // Inline flow: make author wrapper transparent in layout, and keep the author line inline.
+          block.style.setProperty('display', 'block', 'important');
+          authorBlock.style.setProperty('display', 'contents', 'important');
+          const authorLine = authorBlock.querySelector('.woo-box-flex') || authorBlock;
+          authorLine.style.setProperty('display', 'inline-flex', 'important');
+          authorLine.style.setProperty('align-items', 'baseline', 'important');
+          authorLine.style.setProperty('margin-right', '0.25em', 'important');
+          textBlock.style.setProperty('display', 'inline', 'important');
+        });
+      });
     },
   });
 
@@ -16341,6 +18565,7 @@ body .WB_feed_v3 .WB_face .opt.opt .W_btn_b { width: 48px; }
   });
 
   layout.increaseFeedWidth = rule.Rule({
+    v7Support: true,
     id: 'feed_increase_width',
     version: 1,
     parent: layout.layout,
@@ -16409,6 +18634,15 @@ body a.W_gotop.W_gotop { margin-left: calc(calc(calc(var(--yawf-feed-width) + va
 body .WB_timeline { margin-left: calc(calc(calc(20px + var(--yawf-feed-width)) + calc(var(--yawf-left-width) + var(--yawf-right-width))) / 2); }
 html .WB_artical .WB_feed_repeat .WB_feed_publish, html .WB_artical .WB_feed_repeat .repeat_list { padding: 0 20px; }
 html .WB_artical .WB_feed_repeat .W_tips, html .WB_artical .WB_feed_repeat .WB_minitab { margin: 0 16px 10px; }
+
+/* V7 */
+:root { --yawf-v7-sidebar-width: 320px; }
+#app[data-v-app] main.woo-box-flex { max-width: calc(var(--yawf-feed-width) + var(--yawf-v7-sidebar-width)) !important; }
+#app[data-v-app] main.woo-box-flex > :first-child {
+  width: var(--yawf-feed-width) !important;
+  max-width: var(--yawf-feed-width) !important;
+  flex: 0 0 var(--yawf-feed-width) !important;
+}
 `);
     },
   });
@@ -16890,12 +19124,20 @@ span.yawf-feed-screen-name { font-weight: bold; }
   };
 
   content.customizeSource = rule.Rule({
+    v7Support: true,
     id: 'feed_no_custom_source',
     version: 1,
     parent: content.content,
     template: () => i18n.customizeSource,
     ainit() {
       const customizeSource = function customizeSource() {
+        const replaceWithWeiboSource = function (node) {
+          const container = document.createElement('div');
+          container.innerHTML = '<a rel="nofollow" href="//weibo.com/" target="_blank" action-type="app_source" class="S_txt2">微博 weibo.com</a>';
+          node.replaceWith(container.firstChild);
+        };
+
+        // V6 DOM
         const sources = Array.from(document.querySelectorAll('.WB_from:not([yawf-custom-source])'));
         const items = [];
         sources.forEach(from => {
@@ -16911,10 +19153,18 @@ span.yawf-feed-screen-name { font-weight: bold; }
           const item = from.querySelector('a[href*="vip.weibo.com"]');
           if (item) items.push(item);
         });
-        items.forEach(from => {
-          const container = document.createElement('div');
-          container.innerHTML = '<a rel="nofollow" href="//weibo.com/" target="_blank" action-type="app_source" class="S_txt2">微博 weibo.com</a>';
-          from.replaceWith(container.firstChild);
+        items.forEach(replaceWithWeiboSource);
+
+        // V7 best-effort: custom sources often link to vip.weibo.com and appear in the meta line containing "来自".
+        if (!document.querySelector('#app')) return;
+        const v7Candidates = Array.from(document.querySelectorAll('#app[data-v-app] a[href*="vip.weibo.com"]:not([yawf-custom-source])'));
+        v7Candidates.forEach(a => {
+          if (!(a instanceof HTMLAnchorElement)) return;
+          a.setAttribute('yawf-custom-source', 'yawf-custom-source');
+          const line = a.closest('footer,header,[class*="_info_"],[class*=\"info\" i],[class*=\"from\" i]') || a.parentElement;
+          const text = line ? String(line.textContent || '') : '';
+          if (!(/来自|來自|未通过审核应用/.test(text))) return;
+          replaceWithWeiboSource(a);
         });
       };
       observer.dom.add(customizeSource);
@@ -16958,6 +19208,7 @@ span.yawf-feed-screen-name { font-weight: bold; }
   });
 
   content.viewEditInfo = rule.Rule({
+    v7Support: true,
     id: 'view_edit_info',
     version: 44,
     parent: content.content,
@@ -17234,6 +19485,66 @@ span.yawf-feed-screen-name { font-weight: bold; }
         });
       });
 
+      // V7 best-effort: locate the "已编辑" label in meta line and bind it to edit history.
+      const normalizeText = text => String(text || '')
+        .replace(/[\u200b\r\n]+/g, ' ')
+        .replace(/[ \t]+/g, ' ')
+        .trim();
+      const decodeMidFromWeiboUrl = function (href) {
+        try {
+          const url = new URL(String(href || ''), location.href);
+          const match = url.pathname.match(/^\/(?:u\/)?(\d+)\/([0-9A-Za-z]+)(?:$|\/)/);
+          if (!match) return null;
+          const mblogid = match[2];
+          return util.mid.decode(mblogid);
+        } catch (e) {
+          return null;
+        }
+      };
+      const findMidInScope = function (scope) {
+        const links = Array.from(scope.querySelectorAll('a[href]'));
+        for (const a of links) {
+          const href = a.getAttribute('href') || '';
+          const mid = decodeMidFromWeiboUrl(href);
+          if (mid) return mid;
+        }
+        return null;
+      };
+      observer.dom.add(function viewEditInfoV7() {
+        if (!content.viewEditInfo.isEnabled()) return;
+        if (!document.querySelector('#app')) return;
+
+        const root = document.querySelector('main,[role="main"]') || document.body;
+        const candidates = Array.from(root.querySelectorAll('footer a,footer span,header a,header span,div a,div span')).slice(0, 2500);
+        candidates.forEach(node => {
+          if (!(node instanceof Element)) return;
+          if (node.classList && node.classList.contains('yawf-edited')) return;
+          if (node.hasAttribute('yawf-edited')) return;
+
+          const text = normalizeText(node.textContent);
+          if (text !== '已编辑' && text !== '已編輯' && text !== 'Edited') return;
+
+          // Keep it scoped to feed/detail meta lines to reduce false positives.
+          const line = node.closest('footer,header,[class*="_info_"],[class*=\"info\" i],[class*=\"from\" i]') || null;
+          if (!line) return;
+
+          const scope = node.closest('article') || line.closest('article') || root;
+          const mid = findMidInScope(scope) || decodeMidFromWeiboUrl(location.href);
+          if (!mid) return;
+
+          const button = document.createElement('a');
+          button.href = 'javascript:;';
+          button.textContent = text;
+          button.classList.add('yawf-edited');
+          node.setAttribute('yawf-edited', '');
+          node.replaceWith(button);
+          button.addEventListener('click', event => {
+            if (!event.isTrusted) return;
+            showEditInfo(mid);
+          });
+        });
+      });
+
       css.append(`
 .yawf-feed-edit-dialog-content { width: 860px; height: 480px; display: flex; }
 .yawf-feed-edit-select, .yawf-feed-edit-diff { width: 180px; text-align: center; padding-top: 40px; position: relative;}
@@ -17263,6 +19574,7 @@ span.yawf-feed-screen-name { font-weight: bold; }
 .yawf-img-reorder { outline: 3px dotted #36f; }
 .yawf-feed-edit-view-content .WB_media_wrap ~ .WB_media_wrap { border-top-width: 1px; border-top-style: solid; padding-top: 10px; }
 .yawf-diff-image-link { cursor: zoom-in; }
+.yawf-edited { cursor: pointer; }
 `);
     },
   });
@@ -17286,6 +19598,7 @@ span.yawf-feed-screen-name { font-weight: bold; }
 
   // 直接在微博内显示头条文章
   content.viewArticleInline = rule.Rule({
+    v7Support: true,
     id: 'view_article_inline',
     version: 55,
     parent: content.content,
@@ -17544,6 +19857,19 @@ body { position: relative; }
         return function () { rollback.forEach(f => f()); };
       };
 
+      const hideMediaV7 = function (feed) {
+        const mediaList = Array.from(feed.querySelectorAll('.picture, .woo-picture-main, video'));
+        const rollback = mediaList.map(media => {
+          if (!(media instanceof Element)) return null;
+          const rect = media.getBoundingClientRect();
+          if (!(rect.height > 0 && rect.width > 0)) return null;
+          const display = window.getComputedStyle(media).display;
+          media.style.display = 'none';
+          return () => { media.style.display = display; };
+        }).filter(x => x);
+        return function () { rollback.forEach(f => f()); };
+      };
+
       // 让文章内容适配周围的配色
       const computeStyle = function (reference) {
         const text = document.createElement('div');
@@ -17581,6 +19907,23 @@ ${selection ? `
         return css;
       };
 
+      const computeStyleV7 = function (reference) {
+        const ref = reference instanceof Element ? reference : document.body;
+        const base = getComputedStyle(ref);
+        const linkEl = ref.querySelector('a') || ref;
+        const link = getComputedStyle(linkEl);
+        const bg = base.backgroundColor && base.backgroundColor !== 'rgba(0, 0, 0, 0)' ? base.backgroundColor : 'transparent';
+        return `
+:root {
+--text-color: ${base.color};
+--background-color: ${bg};
+--link-color: ${link.color};
+
+--font-family: ${base.fontFamily};
+}
+`;
+      };
+
       const renderArticleControls = function (article, articleData, { id, feed, text, showMedia }) {
         const fold = article.querySelector('.yawf-article-fold');
         fold.addEventListener('click', function () {
@@ -17612,6 +19955,38 @@ ${selection ? `
         if (event.shiftKey || event.ctrlKey || event.metaKey) return;
         const target = event.target;
         if (!(target instanceof Element)) return;
+
+        // V7: detect ttarticle link directly and embed below feed content.
+        if (document.querySelector('#app')) {
+          const a = target.closest('a[href]');
+          if (!a) return;
+          let url;
+          try { url = new URL(a.getAttribute('href') || '', location.href); } catch (e) { return; }
+          if (!/\/ttarticle\/p\/show$/i.test(url.pathname)) return;
+          const id = url.searchParams.get('id');
+          if (!id) return;
+
+          const feed = target.closest('article');
+          if (!feed) return;
+          const text = feed.querySelector('.wbpro-feed-content, .wbpro-feed-ogText, .wbpro-feed-reText') || feed;
+          event.preventDefault();
+          event.stopPropagation();
+          if (feed.hasAttribute('yawf-article-shown')) return;
+
+          const loading = document.createElement('div');
+          loading.className = 'yawf-article-loading';
+          loading.innerHTML = '<i class="W_loading"></i> ';
+          loading.appendChild(document.createTextNode(i18n.articleLoading));
+          feed.setAttribute('yawf-article-shown', '');
+          text.parentElement.insertBefore(loading, text.nextSibling);
+
+          const showMedia = hideMediaV7(feed);
+          const articleData = await request.getArticle(id);
+          const article = renderArticle(articleData, computeStyleV7(text), false);
+          renderArticleControls(article, articleData, { id, feed, text, showMedia });
+          loading.parentElement.replaceChild(article, loading);
+          return;
+        }
         const feed = target.closest('[mid]');
         if (!feed) return;
         const link = target.closest('[suda-uatrack*="1022-article"]');
@@ -17674,6 +20049,7 @@ ${selection ? `
   });
 
   content.linkWithFace = rule.Rule({
+    v7Support: true,
     id: 'link_with_face',
     version: 66,
     parent: content.content,
@@ -17697,7 +20073,7 @@ ${selection ? `
         '(?:/(?:[a-zA-Z0-9$\\-_.+!*\'(),/;:@&=?#]|%[a-fA-F0-9]{2})*)?',
       ].join(''), 'g');
       const clean = this.ref.clean.getConfig();
-      const link = this.ref.clean.getConfig();
+      const link = this.ref.link.getConfig();
 
       observer.feed.onAfter(function (feed) {
         /** @type {Element[]} */
@@ -17712,6 +20088,14 @@ ${selection ? `
           const unfold = element.querySelector('[action-type="fl_unfold"]');
           const nodes = [...element.childNodes];
           let text = '';
+          const isWeiboFaceImage = function (node) {
+            if (!(node instanceof HTMLImageElement)) return false;
+            if (node.matches('img.W_img_face')) return true;
+            const alt = String(node.getAttribute('alt') || node.getAttribute('title') || '').trim();
+            if (!/^\[[^\]]{1,8}\]$/.test(alt)) return false;
+            const src = String(node.getAttribute('src') || '');
+            return /(face\.t\.sinajs\.cn|\/appstyle\/expression\/)/i.test(src);
+          };
           /** @type {[number, number, Node][]} */
           const nodeData = nodes.map(node => {
             const pos = text.length;
@@ -17719,7 +20103,7 @@ ${selection ? `
               text += node.textContent;
               return [pos, node.textContent.length, node];
             } else if (node.nodeType === Node.ELEMENT_NODE) {
-              if (node.matches('img.W_img_face')) {
+              if (isWeiboFaceImage(node)) {
                 return [pos, 0, node];
               } else {
                 text += '\n';
@@ -18581,6 +20965,7 @@ ${selection ? `
   });
 
   details.disableTagDialog = rule.Rule({
+    v7Support: true,
     id: 'feed_disable_tag_dialog',
     version: 1,
     parent: details.details,
@@ -18613,16 +20998,70 @@ ${selection ? `
           text.querySelector('em + em').textContent = i18n.favoriteFeed;
         }
       }, true);
+
+      // V7: 收藏后会弹出“添加标签”对话框；这里尽量自动关闭该对话框。
+      observer.dom.add(function disableV7FavoriteTagDialog() {
+        const app = document.querySelector('#app[data-v-app], #app');
+        if (!app) return;
+        const dialogs = Array.from(document.querySelectorAll([
+          'div[role="dialog"]',
+          '.woo-modal-wrap',
+          '.woo-modal',
+          '.woo-dialog-wrap',
+          '.woo-dialog',
+          '.woo-pop-wrap-main',
+        ].join(',')));
+        dialogs.forEach(dlg => {
+          if (!(dlg instanceof Element)) return;
+          if (dlg.hasAttribute('yawf-disable-fav-tag-dialog')) return;
+          const text = (dlg.textContent || '').replace(/[\u200b\r\n]+/g, ' ').replace(/[ \t]+/g, ' ').trim();
+          if (!text) return;
+          if (!text.includes('添加标签')) return;
+          if (!(text.includes('收藏') || text.includes('微博'))) return;
+          dlg.setAttribute('yawf-disable-fav-tag-dialog', '');
+
+          const clickClose = (el) => {
+            if (!(el instanceof Element)) return false;
+            try { el.click(); return true; } catch (e) { return false; }
+          };
+
+          // Prefer explicit close buttons/icons.
+          const close = dlg.querySelector([
+            'button[aria-label="关闭"]',
+            'button[aria-label="close"]',
+            '.woo-dialog-close',
+            '.woo-modal-close',
+            '[class*="close"] button',
+            'button[class*="close"]',
+          ].join(','));
+          if (clickClose(close)) return;
+
+          // Otherwise choose an action button that cancels/skips tag adding.
+          const btns = Array.from(dlg.querySelectorAll('button, a')).filter(el => el instanceof Element);
+          const pick = (reList) => btns.find(b => {
+            const t = (b.textContent || '').replace(/[\u200b\r\n]+/g, ' ').replace(/[ \t]+/g, ' ').trim();
+            return t && reList.some(re => re.test(t));
+          });
+          const cancel = pick([/^(跳过|取消|关闭|不添加|稍后|以后再说)$/]);
+          if (clickClose(cancel)) return;
+          const ok = pick([/^(确定|完成|知道了)$/]);
+          clickClose(ok);
+        });
+      });
     },
   });
 
   i18n.lowReadingCountWarn = {
-    cn: '在自己个人主页高亮显示阅读数量|不超过{{count}}的微博',
-    tw: '在自己個人主頁高亮顯示閱讀數量|不超過{{count}}的微博',
-    en: 'Highlight feeds on my profile page which has | no more than {{count}} views',
+    cn: '在自己个人主页高亮显示阅读数量|不超过{{count}}的微博{{i}}',
+    tw: '在自己個人主頁高亮顯示閱讀數量|不超過{{count}}的微博{{i}}',
+    en: 'Highlight feeds on my profile page which has | no more than {{count}} views{{i}}',
+  };
+  i18n.lowReadingCountWarnDetail = {
+    cn: '微博 V7 页面通常不再展示“阅读数”，因此可能无法生效；该功能主要用于旧版（V6）或仍显示阅读数的页面。',
   };
 
   details.lowReadingCountWarn = rule.Rule({
+    v7Support: true,
     id: 'feed_low_reading_warn',
     version: 23,
     parent: details.details,
@@ -18635,6 +21074,7 @@ ${selection ? `
         step: 10,
         initial: 100,
       },
+      i: { type: 'bubble', icon: 'ask', template: () => i18n.lowReadingCountWarnDetail },
     },
     ainit() {
       const rule = this;
@@ -18671,12 +21111,32 @@ ${selection ? `
   });
 
   details.feedAbsoluteTime = rule.Rule({
+    v7Support: true,
     id: 'feed_absolute_time',
     version: 60,
     parent: details.details,
     template: () => i18n.feedAbsoluteTime,
     ref: {
       i: { type: 'bubble', icon: 'ask', template: () => i18n.feedAbsoluteTimeDetail },
+    },
+    ainit() {
+      // V7: show absolute time (yyyy-mm-dd hh:mm) using the datetime string stored in link `title`.
+      if (!document.querySelector('#app[data-v-app]')) return;
+      observer.dom.add(function yawfV7FeedAbsoluteTime() {
+        const root = document.querySelector('main,[role="main"]') || document.body;
+        const links = Array.from(root.querySelectorAll('article a[title]:not([yawf-abs-time])'));
+        links.forEach(link => {
+          if (!(link instanceof HTMLAnchorElement)) return;
+          const title = link.getAttribute('title');
+          if (!title) return;
+          // Weibo V7 uses absolute datetime in title like "2026-01-11 01:46".
+          const dt = util.time.parse(title);
+          if (!dt) return;
+          const text = util.time.format(dt, { format: 'year', locale: 'current' });
+          if (link.textContent !== text) link.textContent = text;
+          link.setAttribute('yawf-abs-time', '');
+        });
+      });
     },
   });
 
@@ -18750,6 +21210,7 @@ ${selection ? `
   };
 
   reading.feedOnlyMode = rule.Rule({
+    v7Support: true,
     id: 'feed_only_mode',
     version: 1,
     parent: reading.reading,
@@ -18770,18 +21231,39 @@ ${selection ? `
             '#v6_pl_content_homefeed .WB_tab_a:not([yawf-feed-only-added])',
             'div[id^="Pl_Official_ProfileFeedNav__"] .WB_tab_a:not([yawf-feed-only-added])',
           ].join(','));
-          if (!tabFirst) return;
-          tabFirst.setAttribute('yawf-feed-only-added', '');
-          const wrap = document.createElement('div');
-          wrap.innerHTML = '<div class="yawf-feed-only-button S_bg2"><a class="S_txt1"></a></div>';
-          const line = wrap.firstChild;
-          const button = line.querySelector('a');
-          button.textContent = i18n.feedOnlySwitch;
-          tabFirst.parentNode.insertBefore(line, tabFirst);
-          button.addEventListener('click', event => {
+          if (tabFirst) {
+            tabFirst.setAttribute('yawf-feed-only-added', '');
+            const wrap = document.createElement('div');
+            wrap.innerHTML = '<div class="yawf-feed-only-button S_bg2"><a class="S_txt1"></a></div>';
+            const line = wrap.firstChild;
+            const button = line.querySelector('a');
+            button.textContent = i18n.feedOnlySwitch;
+            tabFirst.parentNode.insertBefore(line, tabFirst);
+            button.addEventListener('click', event => {
+              if (!event.isTrusted) return;
+              rule.ref._enabled.setConfig(!rule.ref._enabled.getConfig());
+            });
+            return;
+          }
+
+          // V7: insert a compact switch button at the top of main column.
+          const app = document.querySelector('#app[data-v-app]');
+          if (!app) return;
+          const main = document.querySelector('main,[role="main"]');
+          if (!main) return;
+          if (main.querySelector('.yawf-feed-only-button-v7')) return;
+          const line = document.createElement('div');
+          line.className = 'yawf-feed-only-button-v7';
+          const btn = document.createElement('button');
+          btn.type = 'button';
+          btn.className = 'woo-button-main yawf-feed-only-button-v7-btn';
+          btn.textContent = i18n.feedOnlySwitch;
+          btn.addEventListener('click', event => {
             if (!event.isTrusted) return;
             rule.ref._enabled.setConfig(!rule.ref._enabled.getConfig());
           });
+          line.appendChild(btn);
+          main.insertBefore(line, main.firstChild);
         };
         observer.dom.add(showButton);
       }
@@ -18826,6 +21308,15 @@ body[yawf-feed-only] #plc_main::after { content: " "; display: table; clear: bot
 body[yawf-feed-only] #plc_main>.WB_main_r { visibility: hidden; margin-right: -230px; }
 body[yawf-feed-only] #plc_main>.WB_frame_b { visibility: hidden; margin-right: -300px; }
 body[yawf-feed-only] .WB_frame { padding-left: 0; }
+
+/* V7 */
+body[yawf-feed-only] { --yawf-v7-sidebar-width: 0px; }
+body[yawf-feed-only] #app[data-v-app] #__sidebar { display: none !important; }
+body[yawf-feed-only] #app[data-v-app] main.woo-box-flex { max-width: calc(var(--yawf-feed-width) + 20px) !important; margin-left: auto !important; margin-right: auto !important; }
+body[yawf-feed-only] #app[data-v-app] main.woo-box-flex > :first-child { width: var(--yawf-feed-width) !important; max-width: var(--yawf-feed-width) !important; flex: 0 0 var(--yawf-feed-width) !important; }
+body[yawf-feed-only] #app[data-v-app] [yawf-v7-left-groups] { display: none !important; }
+.yawf-feed-only-button-v7 { padding: 10px 0; display: flex; justify-content: center; }
+.yawf-feed-only-button-v7-btn { min-width: 160px; }
 `);
 
       const updateEnable = function updateEnable() {
@@ -18844,6 +21335,17 @@ body[yawf-feed-only] .WB_frame { padding-left: 0; }
       };
       rule.ref._enabled.addConfigListener(updateEnable);
       updateEnable();
+
+      // V7: mark the left group panel so it can be hidden in feed-only mode.
+      observer.dom.add(function markV7LeftGroupsPanel() {
+        if (!document.querySelector('#app[data-v-app]')) return;
+        const links = Array.from(document.querySelectorAll('a'));
+        const latest = links.find(a => (a.textContent || '').replace(/[\u200b\r\n]+/g, '').trim() === '最新微博');
+        if (!latest) return;
+        const panel = latest.closest('.woo-panel-main') || latest.closest('aside') || latest.closest('div');
+        if (!panel) return;
+        if (!panel.hasAttribute('yawf-v7-left-groups')) panel.setAttribute('yawf-v7-left-groups', '');
+      });
     },
   });
 
@@ -19180,7 +21682,7 @@ body[yawf-feed-only] .WB_frame { padding-left: 0; }
       rule('weibo.layoutHideOtherTip', 'clean_other_tip');
       rule('weibo.layoutHideOtherRelatedWB', 'clean_other_related_feeds');
       rule('weibo.layoutHideOtherRelatedVideo', 'clean_other_related_video');
-      rule('weibo.layoutHideOtherRelatedArtical', 'clean_other_related_artical');
+      rule('weibo.layoutHideOtherRelatedArtical', 'clean_other_related_article');
       rule('weibo.layoutHideOtherSendWeibo', 'clean_other_send_weibo');
       // 版面展示
       rule('weibo.tool.hide_nav_bar', 'layout_nav_auto_hide');
@@ -19200,9 +21702,6 @@ body[yawf-feed-only] .WB_frame { padding-left: 0; }
       rule('weibo.tool.chose_side', 'layout_side_position');
       rule('weibo.tool.chose_side.side', 'layout_side_position.side');
       rule('weibo.tool.showAllGroup', 'layout_side_show_all_groups');
-      rule('weibo.tool.fixedLeft', 'layout_left_move');
-      rule('weibo.tool.fixedRight', 'layout_right_move');
-      rule('weibo.tool.fixedOthers', 'layout_other_move');
       rule('weibo.tool.custom_font_family', 'font_family');
       rule('weibo.tool.custom_font_family.wf', 'font_family.west');
       rule('weibo.tool.custom_font_family.cf', 'font_family.chinese');
