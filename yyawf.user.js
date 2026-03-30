@@ -366,25 +366,60 @@ const payload = (Array(35).fill('\n').join('') + 'void(' + function (config, mes
     const gid = '11000' + uid;
     const targetPath = '/mygroups?gid=' + gid;
 
+    const getRoutePath = route => {
+      if (!route) return '';
+      const rawPath = String(route.path || route.fullPath || '');
+      return rawPath.split(/[?#]/, 1)[0];
+    };
+    const isHomePathname = pathname => {
+      const path = String(pathname || '');
+      return path === '/' || path === '/home';
+    };
     const isHomeRoute = route => {
       if (!route) return false;
       if (route.name === 'home') return true;
-      const path = route.path || route.fullPath || '';
-      return path === '/' || path === '/home' || path.startsWith('/home?') || path.startsWith('/home/');
+      return isHomePathname(getRoutePath(route));
     };
+    const shouldRedirectCurrentLocationToNewest = ({ enabled, route, href }) => {
+      if (!enabled) return false;
+      if (!isHomeRoute(route)) return false;
+      try {
+        return isHomePathname(new URL(href).pathname);
+      } catch {
+        return false;
+      }
+    };
+
+    let routerReady = false;
+    Promise.resolve(typeof router.isReady === 'function' ? router.isReady() : null)
+      .catch(() => {})
+      .then(() => {
+        routerReady = true;
+        const currentRoute = router.currentRoute.value;
+        if (shouldRedirectCurrentLocationToNewest({
+          enabled: getConfigBoolean('home::newest'),
+          route: currentRoute,
+          href: location.href,
+        })) {
+          router.replace(targetPath).catch(() => {});
+        }
+      });
 
     if (typeof router.__yawf_fix_home_guard__ === 'function') {
       router.__yawf_fix_home_guard__();
     }
     router.__yawf_fix_home_guard__ = router.beforeEach(to => {
       if (!getConfigBoolean('home::newest')) return;
-      if (isHomeRoute(to)) return targetPath;
+      if (!isHomeRoute(to)) return;
+      if (!routerReady) {
+        try {
+          if (!isHomePathname(new URL(location.href).pathname)) return;
+        } catch {
+          return;
+        }
+      }
+      return targetPath;
     });
-
-    const currentRoute = router.currentRoute.value;
-    if (getConfigBoolean('home::newest') && isHomeRoute(currentRoute)) {
-      router.replace(targetPath).catch(() => {});
-    }
 
     const isEnabled = () => getConfigBoolean('home::newest');
 
